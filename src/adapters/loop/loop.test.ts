@@ -27,7 +27,7 @@ let home: string;
 let work: string;
 beforeAll(() => {
   home = mkdtempSync(join(tmpdir(), "loop-home-"));
-  process.env.ROUTER_HOME = home;
+  process.env.VESSEL_HOME = home;
   process.env.LOOP_TEST_KEY = KEY;
   const base = `http://localhost:${server.port}`;
   writeFileSync(

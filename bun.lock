@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "router",
+      "name": "vessel",
       "dependencies": {
         "ink": "^8.0.0",
         "react": "^19.3.1",

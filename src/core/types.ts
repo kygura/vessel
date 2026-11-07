@@ -71,7 +71,7 @@ export interface Adapter {
 export const OutcomeResult = z.enum(["pass", "fail", "unknown"]);
 export type OutcomeResult = z.infer<typeof OutcomeResult>;
 
-/** One line of outcomes.jsonl. A later line with the same sessionId (e.g. from `router rate`) supersedes earlier ones. */
+/** One line of outcomes.jsonl. A later line with the same sessionId (e.g. from `vessel rate`) supersedes earlier ones. */
 export const Outcome = z.object({
   sessionId: z.string(),
   ts: z.string(),

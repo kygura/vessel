@@ -1,4 +1,4 @@
-# router — TUI DESIGN
+# vessel — TUI DESIGN
 
 Design brief for the Ink (React for terminals, Bun) interface described in SPEC.md section 4. The TUI is a thin consumer of the core modules (`roster`, `classify`, `evaluate`, `run`, `sessions`); it holds UI state only and never re-implements routing logic.
 
@@ -72,7 +72,7 @@ Dry-run stops at `ranked`. What each region shows per state:
 - **verifying**: event log header shows `>> verifying: <command>`; the sessions list row for the new session already exists with `??`.
 - **done / failed**: the sessions list row updates its glyph and cost. The event log header shows the final outcome and total cost. Focus returns to the prompt, cleared.
 
-Errors from the core (probe failures, adapter spawn errors, zod rejections) never crash the UI. They render as one red `!! ` line in the event log and, if no session exists yet, in the decision panel body. Full error detail is in the session JSONL for `router logs <id>`.
+Errors from the core (probe failures, adapter spawn errors, zod rejections) never crash the UI. They render as one red `!! ` line in the event log and, if no session exists yet, in the decision panel body. Full error detail is in the session JSONL for `vessel logs <id>`.
 
 Empty states, each one short sentence of muted text centered in its region:
 

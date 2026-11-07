@@ -18,7 +18,7 @@ Captured 2026-11-07 from live `--help` (claude 2.1.319, pi 1.0.0, droid 0.143.1)
 | cost | `result.total_cost_usd` | tokens only | `step_finish.part.cost` | `message_end.message.usage.cost.total` | tokens only |
 | done signal | `{"type":"result"}` | `turn.completed` / `turn.failed` | process exit (1 = error) | `agent_settled` | `completion` |
 
-## Autonomy flags (router `edit` level = default; `full` = explicit opt-in only)
+## Autonomy flags (vessel `edit` level = default; `full` = explicit opt-in only)
 
 | CLI | read-only | edit (default) | full (opt-in, bypass) |
 |---|---|---|---|

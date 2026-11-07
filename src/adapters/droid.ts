@@ -87,7 +87,7 @@ export function createDroidAdapter(bin = "droid", env: Record<string, string | u
       if (!Bun.which(bin)) return { available: false, reason: "not installed", models: [] };
       // `exec --help` lacks the model list, but an invalid model makes droid print it and exit before auth.
       // Worst case (droid runs anyway) it runs read-only (no --auto) in a fresh empty dir, so nothing real can be touched.
-      const dir = await mkdtemp(join(tmpdir(), "router-droid-probe-"));
+      const dir = await mkdtemp(join(tmpdir(), "vessel-droid-probe-"));
       const r = await runCapture([bin, "exec", "--cwd", dir, "-m", "__router_probe__", "--", "x"], 5000).finally(() =>
         rm(dir, { recursive: true, force: true }),
       );

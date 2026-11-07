@@ -13,20 +13,20 @@ import { buildRoster } from "./routing/roster.ts";
 import { getSession, listSessions, readEvents } from "./sessions.ts";
 
 const USAGE: Record<string, string> = {
-  run: `router run "<task>" [--dry-run] [--verify CMD] [--tier trivial|standard|hard]
+  run: `vessel run "<task>" [--dry-run] [--verify CMD] [--tier trivial|standard|hard]
            [--adapter ID] [--model M] [--effort low|medium|high]
            [--autonomy read|edit|full] [--cwd DIR]
   Route the task to the best reachable agent CLI + model and run it. --dry-run stops after the ranked table.`,
-  roster: "router roster\n  Reachable routes, and why each unavailable adapter is unavailable.",
-  sessions: "router sessions\n  List sessions: id, time, task, route, tier, outcome, cost.",
-  logs: "router logs <id>\n  Print a session's event log (id or unique prefix).",
-  resume: `router resume <id> "<prompt>" [--verify CMD] [--autonomy read|edit|full]
+  roster: "vessel roster\n  Reachable routes, and why each unavailable adapter is unavailable.",
+  sessions: "vessel sessions\n  List sessions: id, time, task, route, tier, outcome, cost.",
+  logs: "vessel logs <id>\n  Print a session's event log (id or unique prefix).",
+  resume: `vessel resume <id> "<prompt>" [--verify CMD] [--autonomy read|edit|full]
   Continue a session on the same route via the adapter's native resume.`,
-  rate: "router rate <id> pass|fail\n  Label a finished session's outcome.",
-  trust: "router trust [--cwd DIR]\n  Trust the verify command in DIR/.router.json so runs execute it.",
-  tui: "router [tui]\n  Open the TUI.",
+  rate: "vessel rate <id> pass|fail\n  Label a finished session's outcome.",
+  trust: "vessel trust [--cwd DIR]\n  Trust the verify command in DIR/.vessel.json so runs execute it.",
+  tui: "vessel [tui]\n  Open the TUI.",
 };
-const HELP = `router - route coding tasks to the best reachable agent CLI + model\n\n${Object.values(USAGE).join("\n\n")}\n\nrouter help <command> shows one command.`;
+const HELP = `vessel - route coding tasks to the best reachable agent CLI + model\n\n${Object.values(USAGE).join("\n\n")}\n\nvessel help <command> shows one command.`;
 
 /** Single-line, truncated view of free text. */
 const line = (s: string, n: number) => trunc(s.replace(/\s+/g, " ").trim(), n);
@@ -171,13 +171,13 @@ try {
     case "run": {
       const { positionals, opts } = parseRun(rest);
       const prompt = positionals.join(" ").trim();
-      if (!prompt) fail('usage: router run "<task>" [flags]');
+      if (!prompt) fail('usage: vessel run "<task>" [flags]');
       process.exitCode = await print(runTask(prompt, { ...opts, signal: sigint() }));
       break;
     }
     case "resume": {
       const { positionals: [id, ...p], values } = parseArgs({ args: rest, allowPositionals: true, options: { verify: { type: "string" }, autonomy: { type: "string" } } });
-      if (!id || !p.length) fail('usage: router resume <id> "<prompt>" [--verify CMD] [--autonomy read|edit|full]');
+      if (!id || !p.length) fail('usage: vessel resume <id> "<prompt>" [--verify CMD] [--autonomy read|edit|full]');
       const autonomy = values.autonomy === undefined ? undefined : (Autonomy.safeParse(values.autonomy).data ?? fail(`invalid --autonomy: ${values.autonomy}`));
       process.exitCode = await print(resumeTask(id!, p.join(" "), { verify: values.verify, autonomy, signal: sigint() }));
       break;
@@ -185,13 +185,13 @@ try {
     case "trust": {
       const cwd = dirOrFail(parseArgs({ args: rest, options: { cwd: { type: "string" } } }).values.cwd) ?? process.cwd();
       const r = trustProject(cwd);
-      if (!r) fail(`no verify command in ${cwd}/.router.json`);
+      if (!r) fail(`no verify command in ${cwd}/.vessel.json`);
       console.log(`trusted verify command for ${cwd}:\n  ${r!.command}`);
       break;
     }
     case "rate": {
       const [id, v] = rest;
-      if (!id || (v !== "pass" && v !== "fail")) fail("usage: router rate <id> pass|fail");
+      if (!id || (v !== "pass" && v !== "fail")) fail("usage: vessel rate <id> pass|fail");
       const o = rateSession(id!, v as "pass" | "fail");
       console.log(`${o.sessionId}: ${o.result}`);
       break;

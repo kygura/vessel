@@ -6,10 +6,10 @@ import { loadConfig, loadEvidence } from "./config.ts";
 import { routerPaths } from "./paths.ts";
 
 let home: string;
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), "router-")); process.env.ROUTER_HOME = home; });
-afterEach(() => { rmSync(home, { recursive: true, force: true }); delete process.env.ROUTER_HOME; });
+beforeEach(() => { home = mkdtempSync(join(tmpdir(), "vessel-")); process.env.VESSEL_HOME = home; });
+afterEach(() => { rmSync(home, { recursive: true, force: true }); delete process.env.VESSEL_HOME; });
 
-test("paths live under ROUTER_HOME and sessions dir is created", () => {
+test("paths live under VESSEL_HOME and sessions dir is created", () => {
   const p = routerPaths();
   expect(p.config).toBe(join(home, "config.json"));
   expect(existsSync(p.sessions)).toBe(true);

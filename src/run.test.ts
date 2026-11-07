@@ -9,14 +9,14 @@ import { getSession, listSessions, readEvents, readOutcomes } from "./sessions.t
 let home: string;
 let cwd: string;
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), "router-"));
-  cwd = mkdtempSync(join(tmpdir(), "router-cwd-"));
-  process.env.ROUTER_HOME = home;
+  home = mkdtempSync(join(tmpdir(), "vessel-"));
+  cwd = mkdtempSync(join(tmpdir(), "vessel-cwd-"));
+  process.env.VESSEL_HOME = home;
 });
 afterEach(() => {
   rmSync(home, { recursive: true, force: true });
   rmSync(cwd, { recursive: true, force: true });
-  delete process.env.ROUTER_HOME;
+  delete process.env.VESSEL_HOME;
 });
 
 type Script = (n: number) => RouterEvent[] | Error;
@@ -102,19 +102,19 @@ test("verify command decides pass/fail; agent success alone is unknown", async (
   expect(none.phases).not.toContain("verifying");
 });
 
-test(".router.json verify runs only once trusted; untrusted stays unknown with a notice", async () => {
-  writeFileSync(join(cwd, ".router.json"), JSON.stringify({ verify: "false" }));
+test(".vessel.json verify runs only once trusted; untrusted stays unknown with a notice", async () => {
+  writeFileSync(join(cwd, ".vessel.json"), JSON.stringify({ verify: "false" }));
   const untrusted = await collect(runTask("t", base([fake("claude", () => OK)])));
   expect(untrusted.outcome?.result).toBe("unknown");
   expect(untrusted.phases).not.toContain("verifying");
-  expect(untrusted.all.some((u) => u.type === "notice" && u.message.includes("router trust"))).toBe(true);
+  expect(untrusted.all.some((u) => u.type === "notice" && u.message.includes("vessel trust"))).toBe(true);
 
   expect(trustProject(cwd)).toEqual({ command: "false" });
   const trusted = await collect(runTask("t", base([fake("claude", () => OK)])));
   expect(trusted.outcome?.result).toBe("fail");
 
   // editing the command invalidates trust; explicit --verify is always honored
-  writeFileSync(join(cwd, ".router.json"), JSON.stringify({ verify: "true" }));
+  writeFileSync(join(cwd, ".vessel.json"), JSON.stringify({ verify: "true" }));
   expect((await collect(runTask("t", base([fake("claude", () => OK)])))).outcome?.result).toBe("unknown");
   expect((await collect(runTask("t", base([fake("claude", () => OK)], { verify: "true" })))).outcome?.result).toBe("pass");
 });
@@ -251,14 +251,14 @@ test("asking the classifier is announced; verifying carries the command", async 
   expect(r.all.some((u) => u.type === "phase" && u.phase === "verifying" && u.message === "true")).toBe(true);
 });
 
-test("malformed .router.json yields a notice instead of silently running nothing", async () => {
-  writeFileSync(join(cwd, ".router.json"), "{ nope");
+test("malformed .vessel.json yields a notice instead of silently running nothing", async () => {
+  writeFileSync(join(cwd, ".vessel.json"), "{ nope");
   const r = await collect(runTask("t", base([fake("claude", () => OK)])));
-  expect(r.all.some((u) => u.type === "notice" && u.message.startsWith("ignored .router.json:"))).toBe(true);
+  expect(r.all.some((u) => u.type === "notice" && u.message.startsWith("ignored .vessel.json:"))).toBe(true);
   expect(r.outcome?.result).toBe("unknown");
-  writeFileSync(join(cwd, ".router.json"), JSON.stringify({ verify: 3 }));
+  writeFileSync(join(cwd, ".vessel.json"), JSON.stringify({ verify: 3 }));
   const r2 = await collect(runTask("t", base([fake("claude", () => OK)])));
-  expect(r2.all.some((u) => u.type === "notice" && u.message.startsWith("ignored .router.json:"))).toBe(true);
+  expect(r2.all.some((u) => u.type === "notice" && u.message.startsWith("ignored .vessel.json:"))).toBe(true);
 });
 
 test("abort right after ranked creates no session", async () => {

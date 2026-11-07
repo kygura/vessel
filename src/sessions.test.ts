@@ -6,8 +6,8 @@ import type { Outcome } from "./core/types.ts";
 import { appendEvent, appendOutcome, createSession, getSession, listSessions, readEvents, readOutcomes } from "./sessions.ts";
 
 let home: string;
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), "router-")); process.env.ROUTER_HOME = home; });
-afterEach(() => { rmSync(home, { recursive: true, force: true }); delete process.env.ROUTER_HOME; });
+beforeEach(() => { home = mkdtempSync(join(tmpdir(), "vessel-")); process.env.VESSEL_HOME = home; });
+afterEach(() => { rmSync(home, { recursive: true, force: true }); delete process.env.VESSEL_HOME; });
 
 const route = { adapter: "claude", model: "m", effort: "low" } as const;
 const outcome = (sessionId: string, result: Outcome["result"], costUsd?: number): Outcome =>

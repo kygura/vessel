@@ -3,10 +3,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export function routerHome(): string {
-  return process.env.ROUTER_HOME || join(homedir(), ".router");
+  return process.env.VESSEL_HOME || join(homedir(), ".vessel");
 }
 
-/** Resolves all storage paths under ROUTER_HOME (read at call time) and creates home + sessions dir. */
+/** Resolves all storage paths under VESSEL_HOME (read at call time) and creates home + sessions dir. */
 export function routerPaths() {
   const home = routerHome();
   const sessions = join(home, "sessions");

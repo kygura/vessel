@@ -9,14 +9,14 @@ import { App } from "./App.tsx";
 let home: string;
 let cwd: string;
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), "router-tui-"));
-  cwd = mkdtempSync(join(tmpdir(), "router-tui-cwd-"));
-  process.env.ROUTER_HOME = home;
+  home = mkdtempSync(join(tmpdir(), "vessel-tui-"));
+  cwd = mkdtempSync(join(tmpdir(), "vessel-tui-cwd-"));
+  process.env.VESSEL_HOME = home;
 });
 afterEach(() => {
   rmSync(home, { recursive: true, force: true });
   rmSync(cwd, { recursive: true, force: true });
-  delete process.env.ROUTER_HOME;
+  delete process.env.VESSEL_HOME;
 });
 
 const fake: Adapter = {

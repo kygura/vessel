@@ -19,7 +19,7 @@ export interface TuiRunState {
   events: RouterEvent[];
   verify?: { command: string; ok: boolean; exitCode: number | null; output: string };
   outcome?: Outcome;
-  /** User-facing notes from the run (edit-mode sandbox warning, untrusted .router.json verify), in order, deduped. */
+  /** User-facing notes from the run (edit-mode sandbox warning, untrusted .vessel.json verify), in order, deduped. */
   notices: string[];
   /** Set when the run ended `failed`, or by the hook for non-run errors (e.g. rate). */
   error?: string;

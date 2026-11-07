@@ -80,10 +80,10 @@ async function repoFiles(cwd: string, signal?: AbortSignal): Promise<number | un
 }
 
 const ProjectConfig = z.object({ verify: z.string().optional() });
-/** `error` is set for a present but unreadable/invalid `.router.json`; a missing file is just no verify. */
+/** `error` is set for a present but unreadable/invalid `.vessel.json`; a missing file is just no verify. */
 function projectVerify(cwd: string): { command?: string; error?: string } {
   try {
-    const r = ProjectConfig.safeParse(JSON.parse(readFileSync(join(cwd, ".router.json"), "utf8")));
+    const r = ProjectConfig.safeParse(JSON.parse(readFileSync(join(cwd, ".vessel.json"), "utf8")));
     return r.success ? { command: r.data.verify } : { error: r.error.issues[0]?.message ?? "invalid" };
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === "ENOENT" ? {} : { error: errMsg(e) };
@@ -100,7 +100,7 @@ function trustedHashes(): string[] {
   }
 }
 
-/** Adds the hash of the repo's `.router.json` verify command to trusted.json. Undefined when the repo has none. */
+/** Adds the hash of the repo's `.vessel.json` verify command to trusted.json. Undefined when the repo has none. */
 export function trustProject(cwd: string): { command: string } | undefined {
   const { command } = projectVerify(resolve(cwd));
   if (!command) return;
@@ -109,14 +109,14 @@ export function trustProject(cwd: string): { command: string } | undefined {
   return { command };
 }
 
-/** `--verify` is always honored; a `.router.json` verify runs only when its hash is trusted. */
+/** `--verify` is always honored; a `.vessel.json` verify runs only when its hash is trusted. */
 function resolveVerify(explicit: string | undefined, cwd: string): { command?: string; notice?: string } {
   if (explicit) return { command: explicit };
   const { command, error } = projectVerify(cwd);
-  if (error) return { notice: `ignored .router.json: ${error}` };
+  if (error) return { notice: `ignored .vessel.json: ${error}` };
   if (!command) return {};
   if (trustedHashes().includes(hash(command))) return { command };
-  return { notice: `.router.json verify \`${command}\` is not trusted, so it was not run (outcome stays unknown). To allow it: router trust --cwd ${cwd}` };
+  return { notice: `.vessel.json verify \`${command}\` is not trusted, so it was not run (outcome stays unknown). To allow it: vessel trust --cwd ${cwd}` };
 }
 
 export const editNotice = (adapter: string) => `${adapter} edit mode runs shell commands with your user privileges (no OS sandbox)`;
@@ -192,7 +192,7 @@ async function* execute(
     return;
   }
 
-  // Agent exit status alone never counts as a pass: only the verify command (or `router rate`) labels it.
+  // Agent exit status alone never counts as a pass: only the verify command (or `vessel rate`) labels it.
   // On resume, a previously rated/verified result stands unless verify re-ran; cost and latency accumulate.
   let result: OutcomeResult = o.prev?.result ?? "unknown";
   if (verifyCmd) {
@@ -251,7 +251,7 @@ async function* plan(prompt: string, opts: RunOptions): AsyncGenerator<RunUpdate
     pins: { adapter: opts.adapter, model: opts.model, effort: opts.effort },
   });
   if (!candidates.length) {
-    yield { type: "phase", phase: "failed", message: roster.routes.length ? "no reachable route matches --adapter/--model" : "no reachable routes (run `router roster`)" };
+    yield { type: "phase", phase: "failed", message: roster.routes.length ? "no reachable route matches --adapter/--model" : "no reachable routes (run `vessel roster`)" };
     return;
   }
   yield { type: "phase", phase: "ranked" };

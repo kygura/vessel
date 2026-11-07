@@ -15,7 +15,7 @@ Roster reachable: native claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5, c
 
 Evidence basis: Terminal-Bench 4.0 (Vals, 2026-11-05): opus-5-5 65.15% $12.04, sonnet-5-5 64.14% $10.75 (inside 4-pt band, cheaper → worker), fable-5-1 58.08%, haiku-5-5 36.36%.
 
-Destination: `router` CLI+TUI that routes coding tasks to the best reachable CLI/model and passes the SPEC "Done" list.
+Destination: `vessel` CLI+TUI that routes coding tasks to the best reachable CLI/model and passes the SPEC "Done" list.
 
 ## Decisions so far
 - Stack Bun+TS (user). Execution: CLI adapters + built-in loop (user). Done = SPEC Done list (user).

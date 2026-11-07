@@ -1,10 +1,10 @@
 {
-  "name": "router",
+  "name": "vessel",
   "version": "0.1.0",
   "type": "module",
   "private": true,
   "bin": {
-    "router": "src/cli.ts"
+    "vessel": "src/cli.ts"
   },
   "scripts": {
     "test": "! grep -rnE '\\.only\\(' src && bun test",

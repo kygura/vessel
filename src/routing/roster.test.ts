@@ -7,8 +7,8 @@ import type { Adapter, ModelRef, ProbeResult } from "../core/types.ts";
 import { buildRoster } from "./roster.ts";
 
 let home: string;
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), "router-")); process.env.ROUTER_HOME = home; });
-afterEach(() => { rmSync(home, { recursive: true, force: true }); delete process.env.ROUTER_HOME; });
+beforeEach(() => { home = mkdtempSync(join(tmpdir(), "vessel-")); process.env.VESSEL_HOME = home; });
+afterEach(() => { rmSync(home, { recursive: true, force: true }); delete process.env.VESSEL_HOME; });
 
 const e = (provider: string) => ({ provider, score: 0.5, source: "t", reviewed: "t" });
 const evidence: Evidence = { aliases: {}, models: { "claude-x": e("anthropic"), "claude-y": e("anthropic"), "gpt-x": e("openai"), "kimi-x": e("moonshot") } };
