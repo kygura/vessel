@@ -1,0 +1,57 @@
+import type { RouterEvent, Route, Outcome } from "../core/types.ts";
+import type { Classification } from "../routing/classify.ts";
+import type { Candidate } from "../routing/evaluate.ts";
+import type { Phase, RunUpdate } from "../run.ts";
+
+export const MAX_EVENTS = 500;
+
+export interface TuiRunState {
+  phase: "idle" | Phase;
+  /** Free-text from the latest `phase` update (e.g. "dry run", "aborted"). */
+  message?: string;
+  sessionId?: string;
+  classification?: Classification;
+  source?: "heuristic" | "llm" | "override";
+  candidates: Candidate[];
+  /** Route currently executing (re-set on fallback). */
+  route?: Route;
+  fallbacks: { from: Route; to: Route; reason: string }[];
+  /** Last MAX_EVENTS events. */
+  events: RouterEvent[];
+  verify?: { command: string; ok: boolean; exitCode: number | null; output: string };
+  outcome?: Outcome;
+  /** Set when the run ended `failed`, or by the hook for non-run errors (e.g. rate). */
+  error?: string;
+}
+
+export const initialRun: TuiRunState = { phase: "idle", candidates: [], fallbacks: [], events: [] };
+
+export const isBusy = (s: TuiRunState) => s.phase !== "idle" && s.phase !== "done" && s.phase !== "failed";
+
+/** Pure: fold one core update into UI state. Never mutates `s`. */
+export function reduce(s: TuiRunState, u: RunUpdate): TuiRunState {
+  switch (u.type) {
+    case "phase":
+      return { ...s, phase: u.phase, message: u.message, error: u.phase === "failed" ? (u.message ?? "failed") : s.error };
+    case "started":
+      return { ...s, sessionId: u.sessionId };
+    case "roster":
+      return s; // roster is hook-level state, not per-run
+    case "classification":
+      return { ...s, classification: u.classification, source: u.source };
+    case "ranked":
+      return { ...s, candidates: u.candidates, route: s.route ?? u.candidates[0]?.route };
+    case "route":
+      return { ...s, route: u.route };
+    case "fallback":
+      return { ...s, route: u.to, fallbacks: [...s.fallbacks, { from: u.from, to: u.to, reason: u.reason }] };
+    case "event": {
+      const events = [...s.events, u.event];
+      return { ...s, events: events.length > MAX_EVENTS ? events.slice(-MAX_EVENTS) : events };
+    }
+    case "verify":
+      return { ...s, verify: { command: u.command, ok: u.ok, exitCode: u.exitCode, output: u.output } };
+    case "outcome":
+      return { ...s, outcome: u.outcome };
+  }
+}
