@@ -1,0 +1,70 @@
+import type { Adapter, RouterEvent, RunRequest } from "../core/types.ts";
+import { clip, obj, probeCli, streamCli } from "./common.ts";
+
+const EDIT_TOOLS = "Read Edit Write Bash Glob Grep";
+
+/** Claude Code `stream-json` event -> normalized events. Unknown types yield []. */
+export function parseClaudeLine(json: unknown): RouterEvent[] {
+  const e = obj(json);
+  const out: RouterEvent[] = [];
+  switch (e.type) {
+    case "system":
+      if (e.subtype === "init" && typeof e.session_id === "string") out.push({ type: "session", id: e.session_id });
+      break;
+    case "assistant":
+      for (const b of Array.isArray(e.message?.content) ? e.message.content : []) {
+        if (b?.type === "text" && typeof b.text === "string") out.push({ type: "text", text: b.text });
+        else if (b?.type === "tool_use")
+          out.push({ type: "tool", name: String(b.name ?? "tool"), status: "started", input: clip(b.input) });
+      }
+      break;
+    case "user":
+      // tool_result blocks carry only tool_use_id, so the original tool name is not available here.
+      for (const b of Array.isArray(e.message?.content) ? e.message.content : []) {
+        if (b?.type === "tool_result")
+          out.push({ type: "tool", name: "tool_result", status: b.is_error ? "failed" : "completed", output: clip(b.content) });
+      }
+      break;
+    case "result": {
+      const ok = e.is_error !== true && e.subtype === "success";
+      out.push({
+        type: "usage",
+        inputTokens: e.usage?.input_tokens,
+        outputTokens: e.usage?.output_tokens,
+        costUsd: e.total_cost_usd,
+      });
+      if (!ok) out.push({ type: "error", message: String(e.result ?? e.subtype ?? "claude run failed") });
+      out.push({ type: "done", ok, finalText: typeof e.result === "string" ? e.result : undefined });
+      break;
+    }
+  }
+  return out;
+}
+
+export function buildArgv(req: RunRequest, resumeId?: string): string[] {
+  const argv = ["claude", "-p", req.prompt, "--output-format", "stream-json", "--verbose", "--model", req.model, "--effort", req.effort];
+  if (req.autonomy === "read") argv.push("--permission-mode", "plan");
+  else if (req.autonomy === "edit") argv.push("--permission-mode", "acceptEdits", "--allowedTools", EDIT_TOOLS);
+  else argv.push("--dangerously-skip-permissions");
+  if (resumeId) argv.push("-r", resumeId);
+  return argv;
+}
+
+const stream = (req: RunRequest, signal: AbortSignal, resumeId?: string) =>
+  streamCli(buildArgv(req, resumeId), { cwd: req.cwd, signal }, parseClaudeLine);
+
+export const claude: Adapter = {
+  id: "claude",
+  capabilities: { resume: true, cost: true, listModels: false },
+  // The CLI has no model listing: models stay [] and the roster fills them from evidence aliases.
+  probe: () =>
+    probeCli("claude", ["claude", "auth", "status"], (r) => {
+      try {
+        return r.exitCode === 0 && JSON.parse(r.stdout).loggedIn === true;
+      } catch {
+        return false;
+      }
+    }),
+  run: (req, signal) => stream(req, signal),
+  resume: (id, req, signal) => stream(req, signal, id),
+};

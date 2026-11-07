@@ -1,0 +1,2 @@
+{"type":"thread.started","thread_id":"th-2"}
+{"type":"turn.failed","error":{"message":"boom"}}

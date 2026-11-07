@@ -1,0 +1,4 @@
+{"type":"step_start","timestamp":1,"sessionID":"ses_1","part":{"type":"step-start"}}
+{"type":"tool_use","timestamp":2,"sessionID":"ses_1","part":{"type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"output":"a.txt"}}}
+{"type":"text","timestamp":3,"sessionID":"ses_1","part":{"type":"text","text":"all done"}}
+{"type":"step_finish","timestamp":4,"sessionID":"ses_1","part":{"reason":"stop","cost":0.01,"tokens":{"input":9,"output":4}}}

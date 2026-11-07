@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"s-2"}
+{"type":"result","subtype":"error_max_turns","is_error":true,"total_cost_usd":0.02,"usage":{"input_tokens":1,"output_tokens":2},"session_id":"s-2"}
