@@ -7,12 +7,12 @@ import { AdapterId, ModelRef, type Adapter, type ProbeResult } from "../core/typ
 export interface Roster { routes: ModelRef[]; unavailable: { adapter: AdapterId; reason: string }[] }
 
 const CACHE_TTL_MS = 10 * 60_000;
-/** CLI adapters with no model-list command borrow evidence entries of this provider. */
+/** CLI adapters with no model-list command borrow evidence entries of this provider. Evidence aliases are only name resolution (see evaluate.resolve), never extra routes. */
 const PROVIDER_OF: Partial<Record<AdapterId, string>> = { claude: "anthropic", codex: "openai" };
 
 const Cache = z.object({
   ts: z.number(),
-  adapters: z.array(AdapterId),
+  key: z.string(),
   routes: z.array(ModelRef),
   unavailable: z.array(z.object({ adapter: AdapterId, reason: z.string() })),
 });
@@ -23,11 +23,11 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
-function readCache(path: string, ids: string[], now: number): Roster | undefined {
+function readCache(path: string, key: string, now: number): Roster | undefined {
   if (!existsSync(path)) return;
   try {
     const c = Cache.parse(JSON.parse(readFileSync(path, "utf8")));
-    if (now - c.ts < CACHE_TTL_MS && [...c.adapters].sort().join() === ids.join()) return { routes: c.routes, unavailable: c.unavailable };
+    if (now - c.ts < CACHE_TTL_MS && c.key === key) return { routes: c.routes, unavailable: c.unavailable };
   } catch { /* corrupt cache: re-probe */ }
 }
 
@@ -35,18 +35,23 @@ export async function buildRoster(
   adapters: Adapter[],
   o: { evidence: Evidence; useCache?: boolean; now?: number; timeoutMs?: number },
 ): Promise<Roster> {
-  const { evidence, useCache = true, now = Date.now(), timeoutMs = 8000 } = o;
+  const { evidence, useCache = true, now = Date.now(), timeoutMs = 12_000 } = o;
   const cachePath = routerPaths().roster;
-  const ids = adapters.map((a) => a.id).sort();
+  // key: adapter set + evidence ids of the providers used to fill model lists
+  const fillProviders = new Set(Object.values(PROVIDER_OF));
+  const fillIds = Object.entries(evidence.models).filter(([, m]) => fillProviders.has(m.provider)).map(([id]) => id).sort();
+  const key = `${adapters.map((a) => a.id).sort().join()}|${Bun.hash(fillIds.join())}`;
   if (useCache) {
-    const hit = readCache(cachePath, ids, now);
+    const hit = readCache(cachePath, key, now);
     if (hit) return hit;
   }
 
+  let failed = false; // a timeout/throw is transient: don't cache it for 10 minutes
   const probed = await Promise.all(adapters.map(async (a): Promise<ProbeResult> => {
     try {
       return await withTimeout(a.probe(), timeoutMs);
     } catch (e) {
+      failed = true;
       return { available: false, reason: e instanceof Error ? e.message : String(e), models: [] };
     }
   }));
@@ -66,6 +71,6 @@ export async function buildRoster(
     else roster.routes.push(...models);
   });
 
-  writeFileSync(cachePath, JSON.stringify({ ts: now, adapters: ids, ...roster }));
+  if (!failed) writeFileSync(cachePath, JSON.stringify({ ts: now, key, ...roster }));
   return roster;
 }

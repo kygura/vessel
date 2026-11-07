@@ -85,3 +85,28 @@ test("cache is ignored when the adapter set changes", async () => {
   await buildRoster([a, fake("pi", ok())], { evidence, useCache: true, now: 2 });
   expect(a.calls).toBe(2);
 });
+
+test("cache is not written when a probe timed out or threw", async () => {
+  const bad = fake("pi", () => new Promise(() => {}));
+  const good = fake("codex", ok({ adapter: "codex", model: "gpt-x" }));
+  await buildRoster([bad, good], { evidence, useCache: true, now: 1, timeoutMs: 10 });
+  await buildRoster([bad, good], { evidence, useCache: true, now: 2, timeoutMs: 10 });
+  expect(good.calls).toBe(2);
+  const boom = fake("droid", async () => { throw new Error("x"); });
+  await buildRoster([boom], { evidence, useCache: true, now: 3 });
+  await buildRoster([boom], { evidence, useCache: true, now: 4 });
+  expect(boom.calls).toBe(2);
+});
+
+test("cache is ignored when evidence ids for fill providers change", async () => {
+  const a = fake("claude", ok(), false);
+  await buildRoster([a], { evidence, useCache: true, now: 1 });
+  const more: Evidence = { aliases: {}, models: { ...evidence.models, "claude-z": e("anthropic") } };
+  const r = await buildRoster([a], { evidence: more, useCache: true, now: 2 });
+  expect(a.calls).toBe(2);
+  expect(r.routes.map((x) => x.model)).toContain("claude-z");
+  // unrelated providers do not invalidate
+  const other: Evidence = { aliases: {}, models: { ...more.models, "kimi-y": e("moonshot") } };
+  await buildRoster([a], { evidence: other, useCache: true, now: 3 });
+  expect(a.calls).toBe(2);
+});

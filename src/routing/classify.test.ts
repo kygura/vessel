@@ -44,3 +44,25 @@ test("llm failure keeps the heuristic result", async () => {
   const r = await classify("make the thing better", {}, llm);
   expect(r).toEqual(classifyHeuristic("make the thing better", {}));
 });
+
+test("long filler does not outweigh a small-change word", () => {
+  const p = "rename getUser to fetchUser " + "lorem ".repeat(110);
+  expect(classifyHeuristic(p, {}).tier).toBe("trivial");
+});
+
+test("fenced blocks are ignored", () => {
+  const log = "```\n" + "refactor migrate design architecture ".repeat(50) + "\n```";
+  expect(classifyHeuristic(`fix typo in README.md\n${log}`, {}).tier).toBe("trivial");
+});
+
+test("paths need an extension or ./ prefix", () => {
+  const r = classifyHeuristic("update input/output handling and/or docs", {});
+  expect(r.reasons.some((x) => x.includes("path"))).toBe(false);
+  expect(classifyHeuristic("look at ./scripts and src/a.ts", {}).reasons.join()).toContain("2 paths");
+});
+
+test("create/add words and new-feature prompts", () => {
+  expect(classifyHeuristic("create hello.txt containing hi", {}).tier).toBe("trivial");
+  expect(classifyHeuristic("add a tiny comment to utils.ts", {}).tier).toBe("trivial");
+  expect(classifyHeuristic("implement a new export format", {}).tier).toBe("standard");
+});
