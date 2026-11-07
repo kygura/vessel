@@ -20,7 +20,7 @@ export function lineEvents(line: JsonlLine, parse: ParseLine): RouterEvent[] {
 
 /**
  * Spawns the CLI and streams normalized events. Dedupes repeated `session` ids, fills a missing
- * `finalText` from the last text event, and guarantees exactly one trailing `done`
+ * `finalText` from the last text event, and guarantees exactly one trailing `done` (ok=false if any `error` event was seen)
  * (synthesized from the exit code when the CLI never sent one).
  */
 export async function* streamCli(
@@ -39,6 +39,7 @@ export async function* streamCli(
   let lastText: string | undefined;
   let session: string | undefined;
   let done = false;
+  let failed = false;
   for await (const line of proc.lines) {
     for (const ev of lineEvents(line, parse)) {
       if (done) continue;
@@ -47,9 +48,11 @@ export async function* streamCli(
         session = ev.id;
       } else if (ev.type === "text") {
         lastText = ev.text;
+      } else if (ev.type === "error") {
+        failed = true;
       } else if (ev.type === "done") {
         done = true;
-        yield { ...ev, finalText: ev.finalText ?? lastText };
+        yield { ...ev, ok: ev.ok && !failed, finalText: ev.finalText ?? lastText };
         continue;
       }
       yield ev;
@@ -57,8 +60,8 @@ export async function* streamCli(
   }
   const exit = await proc.exit;
   if (!done) {
-    const ok = exit.exitCode === 0;
-    if (!ok) yield { type: "error", message: `exit ${exit.exitCode ?? "signal"}: ${exit.stderrTail.trim()}` };
+    const ok = exit.exitCode === 0 && !failed;
+    if (exit.exitCode !== 0) yield { type: "error", message: `exit ${exit.exitCode ?? "signal"}: ${exit.stderrTail.trim()}` };
     yield { type: "done", ok, finalText: lastText };
   }
 }

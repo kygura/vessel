@@ -79,16 +79,7 @@ export function parsePiModels(text: string): ModelRef[] {
   return rows.slice(header + 1).map(([provider, id]) => ({ adapter: "pi" as const, model: `${provider}/${id}`, provider }));
 }
 
-/** An `error` event anywhere in the run makes the final `done` not ok. */
-async function* failOnError(it: AsyncIterable<RouterEvent>): AsyncGenerator<RouterEvent> {
-  let failed = false;
-  for await (const ev of it) {
-    if (ev.type === "error") failed = true;
-    yield ev.type === "done" && failed ? { ...ev, ok: false } : ev;
-  }
-}
-
-const stream = (argv: string[], cwd: string, signal: AbortSignal) => failOnError(streamCli(argv, { cwd, signal }, parsePiLine));
+const stream = (argv: string[], cwd: string, signal: AbortSignal) => streamCli(argv, { cwd, signal }, parsePiLine);
 
 export function createPiAdapter(bin = "pi"): Adapter {
   return {

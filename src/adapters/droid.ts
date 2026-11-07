@@ -74,16 +74,7 @@ export function parseDroidModels(text: string): ModelRef[] {
     .map((model) => ({ adapter: "droid" as const, model }));
 }
 
-/** An `error` event anywhere in the run makes the final `done` not ok. */
-async function* failOnError(it: AsyncIterable<RouterEvent>): AsyncGenerator<RouterEvent> {
-  let failed = false;
-  for await (const ev of it) {
-    if (ev.type === "error") failed = true;
-    yield ev.type === "done" && failed ? { ...ev, ok: false } : ev;
-  }
-}
-
-const stream = (argv: string[], cwd: string, signal: AbortSignal) => failOnError(streamCli(argv, { cwd, signal }, parseDroidLine));
+const stream = (argv: string[], cwd: string, signal: AbortSignal) => streamCli(argv, { cwd, signal }, parseDroidLine);
 
 export function createDroidAdapter(bin = "droid", env: Record<string, string | undefined> = process.env): Adapter {
   return {

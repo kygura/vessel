@@ -70,3 +70,12 @@ describe("codex adapter", () => {
     expect(buildArgv(req("edit"), "th-1").slice(-3)).toEqual(["resume", "th-1", "do it"]);
   });
 });
+
+describe("streamCli error handling", () => {
+  test("an error event before a successful done forces done.ok=false", async () => {
+    const parse = (j: unknown): RouterEvent[] =>
+      (j as any).t === "e" ? [{ type: "error", message: "x" }] : [{ type: "done", ok: true }];
+    const evs = await collect(streamCli(["sh", "-c", `echo '{"t":"e"}'; echo '{"t":"d"}'`], {}, parse));
+    expect(done(evs)).toEqual([{ type: "done", ok: false, finalText: undefined }]);
+  });
+});
