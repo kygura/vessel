@@ -2,11 +2,11 @@ import { Box, Text } from "ink";
 import { colorOf, STATUS, type StatusKind } from "../theme.ts";
 
 /** Glyph + word + color for one status. `label=""` renders the glyph alone. */
-export function Status({ kind, label, bold }: { kind: StatusKind; label?: string; bold?: boolean }) {
+export function Status({ kind, label }: { kind: StatusKind; label?: string }) {
   const s = STATUS[kind];
   const word = label ?? s.label;
   return (
-    <Text color={colorOf(kind)} dimColor={s.dim} bold={bold}>
+    <Text color={colorOf(kind)} dimColor={s.dim}>
       {word === "" ? s.glyph : `${s.glyph} ${word}`}
     </Text>
   );

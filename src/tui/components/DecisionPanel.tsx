@@ -10,6 +10,8 @@ export interface DecisionPanelProps {
   /** True when showing a past session's recorded decision. */
   recorded: boolean;
   width: number;
+  /** Terminal columns, forwarded to the candidates table for its column collapse. */
+  cols?: number;
   /** Rows available (8 at 24 terminal rows, up to 14). */
   height?: number;
   /** One-line note while classifying: `heuristic...` or `asking <model>...`. */
@@ -18,6 +20,8 @@ export interface DecisionPanelProps {
   error?: string;
   /** Every adapter unavailable. */
   noRoutes?: boolean;
+  /** Shown in the header while verifying. */
+  verifyCommand?: string;
 }
 
 /** Greedy-wrap the comma-joined reasons into at most two lines of `width` columns. */
@@ -36,12 +40,13 @@ function reasonLines(reasons: string[], width: number): string[] {
   return lines;
 }
 
-export function DecisionPanel({ phase, decision, recorded, width, height = 8, note, error, noRoutes }: DecisionPanelProps) {
+export function DecisionPanel({ phase, decision, recorded, width, cols, height = 8, note, error, noRoutes, verifyCommand }: DecisionPanelProps) {
   const header = (
     <Box>
       <Text bold>Decision</Text>
       {recorded && <Text dimColor> [recorded]</Text>}
       {phase === "classifying" && <Text> <Status kind="running" label="classifying" /></Text>}
+      {phase === "verifying" && <Text> <Status kind="running" label={`verifying: ${verifyCommand ?? ""}`} /></Text>}
     </Box>
   );
   let body: ReactNode;
@@ -58,13 +63,20 @@ export function DecisionPanel({ phase, decision, recorded, width, height = 8, no
           {decision.tier}  {pct(decision.confidence)}  {routeLabel(decision.chosen)} {decision.chosen.effort}
         </Text>
         {reasons.map((l, i) => <Text key={i} dimColor wrap="truncate-end">{l}</Text>)}
-        <CandidatesTable candidates={decision.candidates} chosen={decision.chosen} width={width} maxRows={maxRows} dimOthers={live} />
+        <CandidatesTable candidates={decision.candidates} chosen={decision.chosen} width={width} cols={cols} maxRows={maxRows} dimOthers={live} />
+      </>
+    );
+  } else if (recorded) {
+    body = <Text dimColor>decision not recorded</Text>;
+  } else if (noRoutes) {
+    body = (
+      <>
+        <Empty>No reachable routes. Press r to see why.</Empty>
+        {error && <Status kind="error" label={error} />}
       </>
     );
   } else if (error) {
     body = <Status kind="error" label={error} />;
-  } else if (noRoutes) {
-    body = <Empty>No reachable routes. Press r to see why.</Empty>;
   } else {
     body = <Text dimColor>Type a task and press Enter</Text>;
   }

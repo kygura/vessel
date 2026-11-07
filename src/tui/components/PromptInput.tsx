@@ -7,14 +7,12 @@ export interface PromptInputProps {
   disabled: boolean;
   /** e.g. `resume: ` after pressing R. */
   prefix?: string;
-  /** Replaces the default `running... (Esc to abort)` while disabled. */
-  disabledText?: string;
   focused?: boolean;
   onChange: (value: string) => void;
   onSubmit: (value: string) => void;
 }
 
-export function PromptInput({ value, mode, disabled, prefix, disabledText, focused = true, onChange, onSubmit }: PromptInputProps) {
+export function PromptInput({ value, mode, disabled, prefix, focused = true, onChange, onSubmit }: PromptInputProps) {
   useInput(
     (input, key) => {
       if (key.return) return onSubmit(value);
@@ -29,7 +27,7 @@ export function PromptInput({ value, mode, disabled, prefix, disabledText, focus
       <Text wrap="truncate-start">
         <Text bold>{">"} </Text>
         {disabled ? (
-          <Text dimColor>{disabledText ?? "running... (Esc to abort)"}</Text>
+          <Text dimColor>running... (Esc to abort)</Text>
         ) : (
           <>
             {prefix && <Text dimColor>{prefix}</Text>}

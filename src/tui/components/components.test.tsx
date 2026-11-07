@@ -86,14 +86,17 @@ describe("SessionsList", () => {
     process.env.NO_COLOR = "1";
     const s = [sess("aaaa1111", "pass"), sess("bbbb2222", "fail"), sess("cccc3333")];
     const out = frame(<SessionsList sessions={s} selectedId="bbbb2222" focused width={26} onSelect={() => {}} />);
-    expect(out).toContain("OK aaaa1111 task");
-    expect(out).toContain("XX bbbb2222");
-    expect(out).toContain("?? cccc3333");
+    expect(out).toContain("OK pass aaaa1111");
+    expect(out).toContain("XX fail bbbb2222");
+    expect(out).toContain("?? unknown cccc3333");
+    expect(out).toContain("task for");
+    expect(out).toContain("standard cl");
     expect(out).toContain("> Sessions");
     noWider(out, 26);
     const compact = frame(<SessionsList sessions={s} focused={false} width={26} compact onSelect={() => {}} />);
     expect(compact).toContain("OK aaaa1111");
     expect(compact).not.toContain("task for");
+    expect(compact).not.toContain("pass");
   });
   test("j moves selection through onSelect", async () => {
     const picked: string[] = [];
@@ -215,8 +218,8 @@ describe("RosterOverlay", () => {
     const out = r.lastFrame() ?? "";
     expect(out).toContain("OK claude  2 models");
     expect(out).toContain("OK loop  1 model");
-    expect(out).toContain("-- codex  not installed");
-    expect(out).toContain("-- pi  not logged in");
+    expect(out).toContain("-- codex  unavailable: not installed");
+    expect(out).toContain("-- pi  unavailable: not logged in");
     await Bun.sleep(20);
     r.stdin.write("\x1b");
     await Bun.sleep(50);

@@ -13,6 +13,7 @@ import { RosterOverlay } from "./components/RosterOverlay.tsx";
 import { SessionsList } from "./components/SessionsList.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { isUtf8, type CandidateRow, type Decision, type Focus, type Mode, type Phase } from "./theme.ts";
+import { MAX_EVENTS } from "./state.ts";
 import { useRun } from "./useRun.ts";
 
 export interface AppProps {
@@ -28,6 +29,20 @@ const FOCUS: Focus[] = ["prompt", "sessions", "log"];
 const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x));
 const lineCount = (events: RouterEvent[]) =>
   events.reduce((n, e) => n + (e.type === "text" ? e.text.split("\n").length : e.type === "tool" || e.type === "error" || e.type === "done" ? 1 : 0), 0);
+
+/** The recorded decision exactly as stored; undefined for sessions that predate it (never invent numbers). */
+function recordedDecision(s: SessionRecord): Decision | undefined {
+  const d = s.decision;
+  if (!d) return undefined;
+  return {
+    tier: d.tier, confidence: d.confidence, reasons: d.reasons, chosen: s.route,
+    // prior/local/runs/norms are not stored or displayed; only route, score and cost reach the table.
+    candidates: d.candidates.map((c) => ({
+      route: { adapter: c.adapter, model: c.model, effort: c.effort }, score: c.score, costUsd: c.costUsd,
+      prior: 0, local: 0, runs: 0, costNorm: 0, latencyNorm: 0,
+    })),
+  };
+}
 
 function sumUsage(events: RouterEvent[]): Usage | undefined {
   let u: Usage | undefined;
@@ -103,19 +118,25 @@ export function App({ options, size, onQuit }: AppProps) {
           chosen: run.route ?? run.candidates[0]!.route,
         }
       : undefined;
-  // ponytail: the session record stores no confidence or candidates, so recorded decisions show 100% and an empty table.
-  const recorded = (s: SessionRecord): Decision => ({
-    tier: s.tier, confidence: 1, reasons: ["recorded route (confidence not stored)"], candidates: [], chosen: s.route,
-  });
-  const decision = recordedView ? recorded(sel!) : (liveDecision ?? (sel && run.phase !== "idle" ? recorded(sel) : undefined));
+  // Recorded decision shown for a past session, or while a resume has no live decision of its own.
+  const showRecorded = !!sel && (recordedView || (!liveDecision && run.phase !== "idle"));
+  const decision = showRecorded ? recordedDecision(sel!) : liveDecision;
 
   const pastEvents = useMemo(() => {
     if (!recordedView || !sel) return [];
-    try { return readEvents(sel.id).map((x) => x.event); } catch { return []; }
+    try { return readEvents(sel.id).map((x) => x.event).slice(-MAX_EVENTS); } catch { return []; }
   }, [recordedView, sel?.id, sessions, busy]);
-  const baseEvents = recordedView ? pastEvents : run.events;
-  const events: RouterEvent[] =
-    run.error && (recordedView || run.sessionId) ? [...baseEvents, { type: "error", message: run.error }] : baseEvents;
+  const events = useMemo(() => {
+    const out: RouterEvent[] = [...(recordedView ? pastEvents : run.events)];
+    const v = run.verify;
+    const verifyFailed = !recordedView && !!v && !v.ok;
+    if (verifyFailed) for (const l of v!.output.split("\n").filter((x) => x.trim()).slice(-3)) out.push({ type: "error", message: l });
+    // A failed verify already shows its output; the generic "failed" message adds nothing.
+    if (run.error && (recordedView || run.sessionId) && !(verifyFailed && run.error === "failed")) out.push({ type: "error", message: run.error });
+    return out;
+  }, [recordedView, pastEvents, run.events, run.verify, run.error, run.sessionId]);
+  const lines = useMemo(() => lineCount(events), [events]);
+  const usage = useMemo(() => sumUsage(events), [events]);
 
   // Layout: status(1) + body + prompt(3) + hints(1).
   const total = Math.max(10, rows - 1); // one row spare so Ink never clears the whole terminal each frame
@@ -127,7 +148,7 @@ export function App({ options, size, onQuit }: AppProps) {
   const logH = Math.max(2, bodyH - dh - 1 - notices.length);
 
   const phase: Phase = recordedView ? "done" : run.phase;
-  const maxOffset = Math.max(0, lineCount(events) - (logH - 1));
+  const maxOffset = Math.max(0, lines - (logH - 1));
   const scroll = (d: number) => setOffset((o) => clamp(o + d, 0, maxOffset));
   const select = (id: string) => { setSelectedId(id); setOffset(0); };
 
@@ -160,6 +181,12 @@ export function App({ options, size, onQuit }: AppProps) {
     setFocus("prompt");
   };
 
+  // With no reachable routes nothing can be submitted, so `r` on an empty prompt opens the roster ("Press r to see why").
+  // Everywhere else `r` stays a typeable character so tasks like "refactor ..." work.
+  const change = (v: string) => {
+    if (noRoutes && !prompt && v === "r" && roster) return setOverlay(true);
+    setPrompt(v);
+  };
   const typing = focus === "prompt" && !busy;
   useInput((input, key) => {
     if (key.ctrl && input === "c") return quit();
@@ -199,14 +226,14 @@ export function App({ options, size, onQuit }: AppProps) {
             />
             <Box flexDirection="column" marginLeft={1} width={right}>
               <DecisionPanel
-                phase={phase} decision={decision} recorded={recordedView} width={right} height={dh}
-                error={run.error} noRoutes={noRoutes}
+                phase={phase} decision={decision} recorded={showRecorded} width={right} cols={cols} height={dh}
+                error={run.error} noRoutes={noRoutes} note={run.message} verifyCommand={run.message ?? run.verify?.command}
               />
               {notices.map((n, i) => <Text key={i} dimColor wrap="truncate-end">note: {n}</Text>)}
               <Text dimColor>{rule}</Text>
               <EventLog
-                events={events} phase={phase} elapsedMs={elapsed} usage={sumUsage(events)} focused={focus === "log"}
-                height={logH} tick={tick} verifyCommand={run.verify?.command}
+                events={events} phase={phase} elapsedMs={elapsed} usage={usage} focused={focus === "log"}
+                height={logH} tick={tick} verifyCommand={run.message ?? run.verify?.command}
                 outcome={recordedView ? (sel!.result ?? "unknown") : run.outcome?.result} offset={offset}
               />
             </Box>
@@ -214,8 +241,8 @@ export function App({ options, size, onQuit }: AppProps) {
         )}
       </Box>
       <PromptInput
-        value={prompt} mode={mode} disabled={busy} focused={focus === "prompt"}
-        prefix={resumeId ? "resume: " : undefined} onChange={setPrompt} onSubmit={submit}
+        value={prompt} mode={mode} disabled={busy} focused={focus === "prompt" && !overlay}
+        prefix={resumeId ? "resume: " : undefined} onChange={change} onSubmit={submit}
       />
       <KeyHints focus={focus} state={hintState} hasSelection={!!sel} mode={mode} />
     </Box>

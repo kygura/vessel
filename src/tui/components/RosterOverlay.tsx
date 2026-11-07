@@ -24,7 +24,7 @@ export function RosterOverlay({ roster, onClose }: RosterOverlayProps) {
         return <Status key={a} kind="pass" label={`${a}  ${n} model${n === 1 ? "" : "s"}`} />;
       })}
       {roster.unavailable.map((u) => (
-        <Status key={u.adapter} kind="unavailable" label={`${u.adapter}  ${u.reason}`} />
+        <Status key={u.adapter} kind="unavailable" label={`${u.adapter}  unavailable: ${u.reason}`} />
       ))}
     </Box>
   );

@@ -35,15 +35,13 @@ test("classification, ranked and chosen route", () => {
   expect(s.route).toEqual(A);
 });
 
-test("route and fallback re-point the chosen route and record the reason", () => {
+test("route re-points the chosen route", () => {
   const s = fold([
     { type: "ranked", candidates: [cand(A), cand(B)] },
-    { type: "route", route: A, index: 0 },
-    { type: "fallback", from: A, to: B, reason: "not logged in" },
-    { type: "route", route: B, index: 1 },
+    { type: "route", route: A },
+    { type: "route", route: B },
   ]);
   expect(s.route).toEqual(B);
-  expect(s.fallbacks).toEqual([{ from: A, to: B, reason: "not logged in" }]);
 });
 
 test("started records the session id", () => {
@@ -80,12 +78,10 @@ test("verify failure: failed phase after outcome keeps the outcome", () => {
   expect(s.phase).toBe("failed");
 });
 
-test("roster update is ignored; reduce never mutates its input", () => {
+test("reduce never mutates its input", () => {
   const before = fold([text("a")]);
   const snap = structuredClone(before);
-  expect(reduce(before, { type: "roster", roster: { routes: [], unavailable: [] } })).toBe(before);
   reduce(before, text("b"));
-  reduce(before, { type: "fallback", from: A, to: B, reason: "x" });
   expect(before).toEqual(snap);
 });
 

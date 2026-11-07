@@ -1,8 +1,9 @@
 import type { Route } from "../core/types.ts";
 import type { Candidate } from "../routing/evaluate.ts";
+import type { Phase as RunPhase } from "../run.ts";
 
 /** UI state machine for one submission (DESIGN.md "Interaction"). */
-export type Phase = "idle" | "classifying" | "ranked" | "running" | "verifying" | "done" | "failed";
+export type Phase = "idle" | RunPhase;
 export type Mode = "dry-run" | "run";
 export type Focus = "prompt" | "sessions" | "log";
 
@@ -48,16 +49,6 @@ export const borderStyle = () => (isUtf8() ? ("single" as const) : ASCII_BORDER)
 
 export const SPINNER = "|/-\\";
 
-// ---- formatting: the single place for percentage / currency / duration / truncation ----
-
-export const pct = (x: number): string => `${Math.round(x * 100)}%`;
-export const usd = (x?: number): string =>
-  x === undefined ? "-" : x > 0 && x < 0.01 ? "<$0.01" : `$${x.toFixed(2)}`;
-export const duration = (ms: number): string => {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
-};
-export const tokens = (n: number): string => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`);
-export const trunc = (s: string, max: number): string =>
-  max <= 0 ? "" : s.length <= max ? s : max === 1 ? "…" : `${s.slice(0, max - 1)}…`;
+// Formatting lives in src/format.ts (shared with the CLI); re-exported so components import from one place.
+export { duration, pct, tokens, trunc, usd } from "../format.ts";
 export const routeLabel = (r: Route): string => `${r.adapter}/${r.model}`;

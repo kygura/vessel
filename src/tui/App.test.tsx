@@ -21,7 +21,7 @@ afterEach(() => {
 
 const fake: Adapter = {
   id: "claude",
-  capabilities: { resume: false, cost: true, listModels: true },
+  capabilities: { listModels: true },
   probe: async () => ({ available: true, models: [{ adapter: "claude", model: "sonnet" }, { adapter: "claude", model: "haiku" }] }),
   async *run() { yield { type: "text", text: "hello" }; yield { type: "done", ok: true }; },
 };
@@ -109,5 +109,70 @@ test("run mode streams events and records a session", async () => {
   const out = await until(r, /== done ok/);
   expect(out).toContain("hello");
   expect(out).toMatch(/\?\? [0-9a-f]{8}/); // new row in the sessions list
+  r.unmount();
+});
+
+const route = { adapter: "claude" as const, model: "sonnet", effort: "high" as const };
+const decided = {
+  tier: "hard" as const, confidence: 0.91, reasons: ["touches many files"], source: "heuristic" as const,
+  candidates: [{ ...route, score: 0.77, costUsd: 0.12 }, { adapter: "claude" as const, model: "haiku", effort: "high" as const, score: 0.4 }],
+};
+
+test("sessions rows show outcome word, id, tier and route; recorded decision is real or explicitly absent", async () => {
+  const { createSession } = await import("../sessions.ts");
+  createSession({ cwd, prompt: "old task without decision", route, tier: "standard" });
+  await wait(10);
+  createSession({ cwd, prompt: "newer task with decision", route, tier: "hard", decision: decided });
+  const r = render(<App options={opts()} size={{ columns: 120, rows: 30 }} />);
+  const out = await until(r, /newer task/);
+  expect(out).toMatch(/\?\? unknown [0-9a-f]{8}/);
+  expect(out).toContain("hard claude/sonnet");
+  r.stdin.write("\t");
+  await wait();
+  r.stdin.write("j"); // newest first: the one with a decision
+  const rec = await until(r, /\[recorded\]/);
+  expect(rec).toMatch(/hard\s+91%\s+claude\/sonnet high/);
+  expect(rec).toContain("touches many files");
+  expect(rec).toContain("$0.12");
+  expect(rec).toContain("haiku");
+  r.stdin.write("j");
+  const old = await until(r, /decision not recorded/);
+  expect(old).not.toMatch(/\d+%/);
+  r.unmount();
+});
+
+test("failed verify shows the command while verifying and the last output lines as !! lines", async () => {
+  const r = render(<App options={{ ...opts(), verify: "sleep 0.5; echo l1; echo l2; echo l3; echo l4; exit 1" }} size={size} />);
+  await until(r, /OK claude/);
+  r.stdin.write("do it");
+  await wait();
+  r.stdin.write("\r");
+  const v = await until(r, /verifying: sleep/);
+  expect(v).toContain(">> verifying: sleep 0.5");
+  const out = await until(r, /!! l4/);
+  expect(out).toContain("!! l2");
+  expect(out).not.toContain("!! l1");
+  r.unmount();
+});
+
+test("no reachable routes: submit is blocked with the hint and r on an empty prompt opens the roster", async () => {
+  const dead: Adapter = { ...fake, probe: async () => ({ available: false, reason: "not installed", models: [] }) };
+  const r = render(<App options={{ ...opts(), adapters: [dead] }} size={size} />);
+  const idle = await until(r, /No reachable routes/);
+  expect(idle.replace(/\s+/g, " ")).toContain("No reachable routes. Press r to see why.");
+  r.stdin.write("fix");
+  await wait();
+  r.stdin.write("\r");
+  await wait(200);
+  const blocked = r.lastFrame() ?? "";
+  expect(blocked).toContain("No reachable routes.");
+  expect(blocked).toContain("No sessions yet");
+  expect(blocked).not.toContain("classifying");
+  r.stdin.write("\x1b"); // clear the prompt
+  await wait();
+  r.stdin.write("r");
+  const ov = await until(r, /Esc to close/);
+  expect(ov).toContain("unavailable: not installed");
+  expect(ov).toContain("> ");
   r.unmount();
 });

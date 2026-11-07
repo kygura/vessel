@@ -6,22 +6,26 @@ const same = (a: Route, b: Route) => a.adapter === b.adapter && a.model === b.mo
 const cell = (s: string, w: number) => trunc(s, w).padEnd(w);
 const short = (e: string) => (e === "medium" ? "med" : e);
 
-/** Panel width at which cost and effort get their own columns (about 100+ terminal columns). */
+/** Terminal width at which cost and effort get their own columns (DESIGN: collapsed under 100 columns). */
+const FULL_COLS = 100;
+/** Panel-width fallback when the caller does not pass the terminal width. */
 const FULL_AT = 70;
 
 export interface CandidatesTableProps {
   candidates: CandidateRow[];
   chosen: Route;
   width: number;
+  /** Terminal columns; drives the column collapse (falls back to `width`). */
+  cols?: number;
   /** Show at most this many rows, then a muted `+N more` footer. */
   maxRows?: number;
   /** Dim every row except the chosen one (run in progress). */
   dimOthers?: boolean;
 }
 
-export function CandidatesTable({ candidates, chosen, width, maxRows = Infinity, dimOthers }: CandidatesTableProps) {
+export function CandidatesTable({ candidates, chosen, width, cols, maxRows = Infinity, dimOthers }: CandidatesTableProps) {
   if (candidates.length === 0) return <Text dimColor>No candidates.</Text>;
-  const full = width >= FULL_AT;
+  const full = cols === undefined ? width >= FULL_AT : cols >= FULL_COLS;
   const shown = candidates.slice(0, maxRows);
   const modelW = Math.min(24, Math.max(8, width - (full ? 2 + 5 + 7 + 8 + 10 + 7 : 2 + 5 + 7 + 10 + 11)));
   const line = (mark: string, rank: string, score: string, c: CandidateRow | undefined) => {
@@ -39,7 +43,7 @@ export function CandidatesTable({ candidates, chosen, width, maxRows = Infinity,
         const on = same(c.route, chosen);
         return (
           <Text key={i} bold={on} dimColor={!!dimOthers && !on} wrap="truncate-end">
-            {line(on ? "* " : "  ", String(i + 1), c.score.toFixed(2), c)}
+            {line(on ? "* " : c.explored ? "~ " : "  ", String(i + 1), c.score.toFixed(2), c)}
           </Text>
         );
       })}

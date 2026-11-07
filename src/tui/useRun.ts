@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ADAPTERS } from "../adapters/index.ts";
 import { loadEvidence } from "../core/config.ts";
+import { errMsg } from "../core/proc.ts";
 import { type Roster, buildRoster } from "../routing/roster.ts";
 import { type RunOptions, type RunUpdate, rateSession, resumeTask, runTask } from "../run.ts";
 import type { SessionRecord } from "../core/types.ts";
@@ -30,15 +31,24 @@ export function useRun(base: RunOptions = {}): UseRun {
   // Latest state for the re-entrancy guard in `drive` without re-creating callbacks.
   const runRef = useRef(run);
   runRef.current = run;
-  const refresh = useCallback(() => { if (live.current) setSessions(listSessions()); }, []);
-  const fail = (e: unknown) => setRun((s) => ({ ...s, error: e instanceof Error ? e.message : String(e) }));
+  const fail = useCallback((e: unknown) => setRun((s) => ({ ...s, error: errMsg(e) })), []);
+  const refresh = useCallback(() => {
+    if (!live.current) return;
+    try { setSessions(listSessions()); } catch (e) { fail(e); }
+  }, []);
 
   useEffect(() => {
     live.current = true;
     refresh();
-    buildRoster(base.adapters ?? ADAPTERS, { evidence: loadEvidence() })
+    // Evidence load is inside the chain so a corrupt file or unwritable home shows as an error, not a crash.
+    Promise.resolve()
+      .then(() => buildRoster(base.adapters ?? ADAPTERS, { evidence: loadEvidence() }))
       .then((r) => live.current && setRoster(r))
-      .catch(() => live.current && setRoster({ routes: [], unavailable: [] }));
+      .catch((e) => {
+        if (!live.current) return;
+        setRoster({ routes: [], unavailable: [] });
+        fail(e);
+      });
     return () => { live.current = false; ctl.current?.abort(); };
   }, []);
 
@@ -61,8 +71,8 @@ export function useRun(base: RunOptions = {}): UseRun {
 
   return {
     run, busy, roster, sessions,
-    start: (prompt, o) => void drive("classifying", (signal) => runTask(prompt, { ...base, dryRun: o?.dryRun, signal })),
-    resume: (id, prompt) => void drive("running", (signal) => resumeTask(id, prompt, { ...base, signal })),
+    start: (prompt, o) => void drive("classifying", (signal) => runTask(prompt, { ...base, dryRun: o?.dryRun, signal })).catch(fail),
+    resume: (id, prompt) => void drive("running", (signal) => resumeTask(id, prompt, { ...base, signal })).catch(fail),
     rate(id, result) {
       try { rateSession(id, result); refresh(); } catch (e) { fail(e); }
     },

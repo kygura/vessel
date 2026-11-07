@@ -13,9 +13,8 @@ export interface TuiRunState {
   classification?: Classification;
   source?: "heuristic" | "llm" | "override";
   candidates: Candidate[];
-  /** Route currently executing (re-set on fallback). */
+  /** Route currently executing (re-set when a later route starts). */
   route?: Route;
-  fallbacks: { from: Route; to: Route; reason: string }[];
   /** Last MAX_EVENTS events. */
   events: RouterEvent[];
   verify?: { command: string; ok: boolean; exitCode: number | null; output: string };
@@ -26,7 +25,7 @@ export interface TuiRunState {
   error?: string;
 }
 
-export const initialRun: TuiRunState = { phase: "idle", candidates: [], fallbacks: [], events: [], notices: [] };
+export const initialRun: TuiRunState = { phase: "idle", candidates: [], events: [], notices: [] };
 
 export const isBusy = (s: TuiRunState) => s.phase !== "idle" && s.phase !== "done" && s.phase !== "failed";
 
@@ -37,16 +36,12 @@ export function reduce(s: TuiRunState, u: RunUpdate): TuiRunState {
       return { ...s, phase: u.phase, message: u.message, error: u.phase === "failed" ? (u.message ?? "failed") : s.error };
     case "started":
       return { ...s, sessionId: u.sessionId };
-    case "roster":
-      return s; // roster is hook-level state, not per-run
     case "classification":
       return { ...s, classification: u.classification, source: u.source };
     case "ranked":
       return { ...s, candidates: u.candidates, route: s.route ?? u.candidates[0]?.route };
     case "route":
       return { ...s, route: u.route };
-    case "fallback":
-      return { ...s, route: u.to, fallbacks: [...s.fallbacks, { from: u.from, to: u.to, reason: u.reason }] };
     case "event": {
       const events = [...s.events, u.event];
       return { ...s, events: events.length > MAX_EVENTS ? events.slice(-MAX_EVENTS) : events };
@@ -57,5 +52,7 @@ export function reduce(s: TuiRunState, u: RunUpdate): TuiRunState {
       return { ...s, outcome: u.outcome };
     case "notice":
       return s.notices.includes(u.message) ? s : { ...s, notices: [...s.notices, u.message] };
+    default:
+      return s; // roster/fallback-style updates are not UI state
   }
 }
