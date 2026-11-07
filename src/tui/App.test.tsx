@@ -176,3 +176,14 @@ test("no reachable routes: submit is blocked with the hint and r on an empty pro
   expect(ov).toContain("> ");
   r.unmount();
 });
+
+test("Ctrl+D toggles the mode from both the raw byte and the kitty sequence", async () => {
+  const r = render(<App options={opts()} size={size} />);
+  await until(r, /OK claude/);
+  for (const [seq, tag] of [["\u0004", "[dry-run]"], ["\x1b[100;5u", "[run]"], ["\u0004", "[dry-run]"]] as const) {
+    r.stdin.write(seq);
+    await until(r, new RegExp(tag.replace(/[[\]-]/g, "\\$&")));
+    expect(r.lastFrame()).toContain(tag);
+  }
+  r.unmount();
+});
