@@ -33,8 +33,8 @@ function fake(id: Adapter["id"], script: Script, resume = false): Adapter & { ru
       if (r instanceof Error) throw r;
       yield* r;
     },
-    async *resume(native: string, req: { autonomy: string }) { a.resumed.push(native); a.autonomy.push(req.autonomy); yield* OK; },
   };
+  if (resume) Object.assign(a, { async *resume(native: string, req: { autonomy: string }) { a.resumed.push(native); a.autonomy.push(req.autonomy); yield* OK; } });
   return a as never;
 }
 
@@ -54,13 +54,13 @@ test("falls back to the next candidate on start failure (error events before any
   const a = fake("claude", () => BOOT_FAIL);
   const b = fake("codex", () => OK);
   const r = await collect(runTask("do it", base([a, b])));
-  expect(r.all.filter((u) => u.type === "fallback")).toHaveLength(1);
+  expect(r.all.filter((u) => u.type === "event" && u.event.type === "error" && u.event.message === "fallback: not logged in -> codex/codex-m")).toHaveLength(1);
   expect(r.phases).toEqual(["classifying", "ranked", "running", "done"]);
   expect(r.outcome?.route.adapter).toBe("codex");
   expect(r.outcome?.costUsd).toBe(0.5);
   const s = listSessions()[0]!;
   expect(s.route.adapter).toBe("codex");
-  expect(readEvents(s.id).some((e) => e.event.type === "error" && e.event.message.includes("falling back"))).toBe(true);
+  expect(readEvents(s.id).some((e) => e.event.type === "error" && e.event.message.startsWith("fallback:"))).toBe(true);
 });
 
 test("falls back when the adapter throws on spawn; fails when every route fails", async () => {
@@ -72,6 +72,9 @@ test("falls back when the adapter throws on spawn; fails when every route fails"
   expect(a.runs).toBe(1);
   expect(b.runs).toBe(1);
   expect(r.outcome).toBeUndefined();
+  // all-fail: no per-route outcomes, just one `unknown` for the last tried route so the session can be rated
+  expect(readOutcomes()).toMatchObject([{ result: "unknown", route: { adapter: "codex" } }]);
+  expect(rateSession(listSessions()[0]!.id, "fail").result).toBe("fail");
 });
 
 test("no fallback once the agent produced output, even if it then fails", async () => {
@@ -133,7 +136,7 @@ test("abort during the run or during verify fails with 'aborted' and records no 
 test("start-failure fallbacks are capped at 3 (4 attempts)", async () => {
   const all = (["claude", "codex", "opencode", "pi", "droid"] as const).map((id) => fake(id, () => BOOT_FAIL));
   const r = await collect(runTask("t", base(all)));
-  expect(r.all.filter((u) => u.type === "fallback")).toHaveLength(3);
+  expect(r.all.filter((u) => u.type === "event" && u.event.type === "error" && u.event.message.startsWith("fallback:"))).toHaveLength(3);
   expect(all.map((a) => a.runs)).toEqual([1, 1, 1, 1, 0]);
   expect(r.last.phase).toBe("failed");
 });
@@ -144,8 +147,12 @@ test("native session id comes only from the final route; rate refuses without an
   const r = await collect(runTask("t", base([a, b])));
   expect(getSession(r.all.find((u) => u.type === "started")!.sessionId)?.nativeSessionId).toBeUndefined();
 
-  const dead = await collect(runTask("t", base([fake("claude", () => BOOT_FAIL)])));
-  const id = dead.all.find((u) => u.type === "started")!.sessionId;
+  const ac = new AbortController();
+  let id = "";
+  for await (const u of runTask("t", base([fake("claude", () => OK)], { signal: ac.signal }))) {
+    if (u.type === "started") id = u.sessionId;
+    if (u.type === "event" && u.event.type === "text") ac.abort();
+  }
   expect(() => rateSession(id, "pass")).toThrow("no outcome");
 });
 
@@ -219,4 +226,37 @@ test("resume reports unsupported adapters", async () => {
   const id = r.all.find((u) => u.type === "started")!.sessionId;
   const res = await collect(resumeTask(id, "more", { adapters: [a] }));
   expect(res.last).toMatchObject({ phase: "failed", message: expect.stringContaining("unsupported") });
+});
+
+test("routing decision is persisted on the session with top-5 candidates", async () => {
+  const r = await collect(runTask("rename a to b in x.ts", base([fake("claude", () => OK)], { tier: undefined })));
+  const s = getSession(r.all.find((u) => u.type === "started")!.sessionId)!;
+  expect(s.decision).toMatchObject({ tier: "trivial", source: "heuristic", candidates: [{ adapter: "claude", model: "claude-m" }] });
+  expect(s.decision!.candidates.length).toBeLessThanOrEqual(5);
+});
+
+test("abort before the session exists (during classification) creates no session", async () => {
+  const ac = new AbortController();
+  const llm = async () => { ac.abort(); throw new Error("aborted"); };
+  const r = await collect(runTask("do something somewhat ambiguous", base([fake("claude", () => OK)], { tier: undefined, llm, signal: ac.signal })));
+  expect(r.last).toMatchObject({ phase: "failed", message: "aborted" });
+  expect(listSessions()).toHaveLength(0);
+});
+
+test("asking the classifier is announced; verifying carries the command", async () => {
+  const llm = async () => ({ tier: "hard" as const, reasons: ["x"] });
+  const r = await collect(runTask("do something somewhat ambiguous here", base([fake("claude", () => OK)], { tier: undefined, llm, verify: "true" })));
+  expect(r.all.some((u) => u.type === "phase" && u.message === "asking classifier...")).toBe(true);
+  expect(r.all.find((u) => u.type === "classification")).toMatchObject({ source: "llm" });
+  expect(r.all.some((u) => u.type === "phase" && u.phase === "verifying" && u.message === "true")).toBe(true);
+});
+
+test("malformed .router.json yields a notice instead of silently running nothing", async () => {
+  writeFileSync(join(cwd, ".router.json"), "{ nope");
+  const r = await collect(runTask("t", base([fake("claude", () => OK)])));
+  expect(r.all.some((u) => u.type === "notice" && u.message.startsWith("ignored .router.json:"))).toBe(true);
+  expect(r.outcome?.result).toBe("unknown");
+  writeFileSync(join(cwd, ".router.json"), JSON.stringify({ verify: 3 }));
+  const r2 = await collect(runTask("t", base([fake("claude", () => OK)])));
+  expect(r2.all.some((u) => u.type === "notice" && u.message.startsWith("ignored .router.json:"))).toBe(true);
 });

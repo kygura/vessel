@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { appendFileSync, readFileSync, readdirSync } from "node:fs";
 import { z } from "zod";
 import { routerPaths } from "./core/paths.ts";
 import { Outcome, RouterEvent, SessionRecord } from "./core/types.ts";
@@ -14,11 +14,17 @@ const Line = z.discriminatedUnion("kind", [
 ]);
 type Line = z.infer<typeof Line>;
 
-const readJsonl = <T>(path: string, schema: z.ZodType<T>): T[] => {
-  if (!existsSync(path)) return [];
+/** `keep` skips JSON.parse for lines that cannot matter (listing never parses the bulk of a log). */
+const readJsonl = <T>(path: string, schema: z.ZodType<T>, keep: (raw: string) => boolean = () => true): T[] => {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return []; // missing file
+  }
   const out: T[] = [];
-  for (const raw of readFileSync(path, "utf8").split("\n")) {
-    if (!raw.trim()) continue;
+  for (const raw of text.split("\n")) {
+    if (!raw.trim() || !keep(raw)) continue;
     try {
       const r = schema.safeParse(JSON.parse(raw));
       if (r.success) out.push(r.data);
@@ -57,7 +63,8 @@ export function readOutcomes(): Outcome[] {
 export const appendOutcome = (o: Outcome) => append(routerPaths().outcomes, o);
 
 function load(id: string, outcomes: Outcome[]): SessionRecord | undefined {
-  const lines = readJsonl(routerPaths().sessionLog(id), Line);
+  // only record lines and native-session events matter here
+  const lines = readJsonl(routerPaths().sessionLog(id), Line, (raw) => raw.startsWith('{"kind":"record"') || raw.includes('"event":{"type":"session"'));
   const at = lines.findLastIndex((l) => l.kind === "record");
   if (at < 0) return;
   // Native id = last `session` event after the final route record, so a failed route's id (or another adapter's) is never reused.

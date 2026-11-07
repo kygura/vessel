@@ -11,10 +11,10 @@ export interface Candidate {
   latencyNorm: number;
   explored?: boolean;
 }
-export interface Lambdas { cost: Record<Tier, number>; latency: Record<Tier, number> }
 export interface Pins { adapter?: AdapterId; model?: string; effort?: Effort }
 
-export const LAMBDAS: Lambdas = {
+const LAMBDAS: { cost: Record<Tier, number>; latency: Record<Tier, number> } = {
+  // cost/latency penalty weights per tier (SPEC: λc, λl)
   cost: { trivial: 0.4, standard: 0.15, hard: 0.02 },
   latency: { trivial: 0.1, standard: 0.05, hard: 0 },
 };
@@ -41,9 +41,9 @@ export function resolve(evidence: Evidence, model: string): string {
 export function rank(
   routes: ModelRef[],
   tier: Tier,
-  o: { evidence: Evidence; outcomes: Outcome[]; rng?: () => number; pins?: Pins; lambda?: Lambdas; explore?: boolean },
+  o: { evidence: Evidence; outcomes: Outcome[]; rng?: () => number; pins?: Pins; explore?: boolean },
 ): Candidate[] {
-  const { evidence, pins = {}, lambda = LAMBDAS, rng = Math.random, explore = true } = o;
+  const { evidence, pins = {}, rng = Math.random, explore = true } = o;
   const res = (m: string) => resolve(evidence, m);
   const effort = pins.effort ?? EFFORT[tier];
 
@@ -51,18 +51,16 @@ export function rank(
   if (!refs.length) return [];
   const priorOf = (r: ModelRef) => evidence.models[res(r.model)]?.score ?? 0.5;
   const costOf = (r: ModelRef) => evidence.models[res(r.model)]?.costPerTask;
-  // drop Pareto-dominated routes (pins bypass) so weak expensive models cannot stretch normalization
-  if (!Object.values(pins).some((v) => v !== undefined)) {
+  // drop Pareto-dominated routes (adapter/model pins bypass; an effort pin does not) so weak expensive models cannot stretch normalization
+  if (!pins.adapter && !pins.model) {
     const med = median(refs.map(costOf).filter((c): c is number => c !== undefined));
     const cost = (r: ModelRef) => costOf(r) ?? med;
     const all = refs;
     refs = all.filter((r) => !all.some((q) => priorOf(q) >= priorOf(r) && cost(q) <= cost(r) && (priorOf(q) > priorOf(r) || cost(q) < cost(r))));
   }
 
-  // later line with the same sessionId supersedes earlier ones
-  const bySession = new Map<string, Outcome>();
-  for (const out of o.outcomes) bySession.set(out.sessionId, out);
-  const forTier = [...bySession.values()].filter((x) => x.tier === tier);
+  // outcomes are already one-per-session (sessions.readOutcomes)
+  const forTier = o.outcomes.filter((x) => x.tier === tier);
   const mine = (r: ModelRef) => forTier.filter((x) => x.route.adapter === r.adapter && x.route.model === r.model);
 
   const costs = refs.map(costOf);
@@ -83,7 +81,7 @@ export function rank(
     const w = runs / (runs + 5);
     const prior = priorOf(r);
     const quality = (1 - w) * prior + w * local;
-    const score = quality - lambda.cost[tier] * costNorm[i]! - lambda.latency[tier] * latNorm[i]!;
+    const score = quality - LAMBDAS.cost[tier] * costNorm[i]! - LAMBDAS.latency[tier] * latNorm[i]!;
     return { route: { adapter: r.adapter, model: r.model, effort }, score, prior, local, runs, costNorm: costNorm[i]!, latencyNorm: latNorm[i]! };
   });
   // tie-break: CLI adapters before loop

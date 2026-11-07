@@ -1,17 +1,17 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import { ADAPTERS } from "./adapters/index.ts";
 import { complete } from "./adapters/loop/index.ts";
-import { loadEvidence } from "./core/config.ts";
+import { type Evidence, loadEvidence } from "./core/config.ts";
 import { routerPaths } from "./core/paths.ts";
-import { runCapture } from "./core/proc.ts";
+import { errMsg, runCapture } from "./core/proc.ts";
 import {
   type Adapter, type Autonomy, type Effort, type Outcome, type OutcomeResult, type RouterEvent, type Route, type SessionRecord, type Tier,
   Tier as TierSchema,
 } from "./core/types.ts";
-import { type Classification, type LlmClassifier, classify } from "./routing/classify.ts";
-import { type Candidate, rank } from "./routing/evaluate.ts";
+import { type Classification, type LlmClassifier, classify, classifyHeuristic } from "./routing/classify.ts";
+import { type Candidate, rank, resolve as resolveModel } from "./routing/evaluate.ts";
 import { type Roster, buildRoster } from "./routing/roster.ts";
 import { appendEvent, appendOutcome, createSession, getSession, readOutcomes, saveSession } from "./sessions.ts";
 
@@ -25,11 +25,9 @@ export type Phase = "classifying" | "ranked" | "running" | "verifying" | "done" 
 export type RunUpdate =
   | { type: "phase"; phase: Phase; message?: string }
   | { type: "started"; sessionId: string }
-  | { type: "roster"; roster: Roster }
   | { type: "classification"; classification: Classification; source: "heuristic" | "llm" | "override" }
   | { type: "ranked"; candidates: Candidate[] }
-  | { type: "route"; route: Route; index: number }
-  | { type: "fallback"; from: Route; to: Route; reason: string }
+  | { type: "route"; route: Route }
   | { type: "event"; event: RouterEvent }
   | { type: "verify"; command: string; ok: boolean; exitCode: number | null; output: string }
   | { type: "outcome"; outcome: Outcome }
@@ -54,48 +52,41 @@ export interface RunOptions {
 const CLASSIFY_TIMEOUT_MS = 15_000;
 const VERIFY_TIMEOUT_MS = 600_000;
 const MAX_FALLBACKS = 3;
+const ABORTED = { type: "phase", phase: "failed", message: "aborted" } as const satisfies RunUpdate;
 const ClassifyReply = z.object({ tier: TierSchema, reasons: z.array(z.string()) });
 
-function timeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  let t: ReturnType<typeof setTimeout>;
-  const limit = new Promise<never>((_, rej) => { t = setTimeout(() => rej(new Error("timed out")), ms); });
-  return Promise.race([p, limit]).finally(() => clearTimeout(t));
-}
-
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
-
 /** LLM fallback: cheapest loop route (by evidence cost, unknown last) answers once. Undefined when there is no loop route. */
-function loopClassifier(roster: Roster, evidence: ReturnType<typeof loadEvidence>): LlmClassifier | undefined {
-  const bare = (m: string) => { const id = m.slice(m.indexOf("/") + 1); return evidence.aliases[id] ?? id; };
-  const cost = (m: string) => evidence.models[bare(m)]?.costPerTask ?? Infinity;
+function loopClassifier(roster: Roster, evidence: Evidence, signal?: AbortSignal): { label: string; fn: LlmClassifier } | undefined {
+  const cost = (m: string) => evidence.models[resolveModel(evidence, m)]?.costPerTask ?? Infinity;
   const loop = roster.routes.filter((r) => r.adapter === "loop").sort((a, b) => cost(a.model) - cost(b.model))[0];
   if (!loop) return;
   const i = loop.model.indexOf("/");
-  return (prompt) =>
-    timeout(
+  return {
+    label: loop.model,
+    fn: (prompt) =>
       complete(
         loop.model.slice(0, i),
         loop.model.slice(i + 1),
         `Classify the complexity of this coding task as "trivial" (tiny, local edit), "standard" (a normal feature or fix), or "hard" (multi-file, architectural, or ambiguous). Reply with JSON {"tier": "...", "reasons": ["..."]}.\n\nTask:\n${prompt}`,
         ClassifyReply,
+        { signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(CLASSIFY_TIMEOUT_MS)]) },
       ),
-      CLASSIFY_TIMEOUT_MS,
-    );
+  };
 }
 
-async function repoFiles(cwd: string): Promise<number | undefined> {
-  const r = await runCapture(["git", "-C", cwd, "ls-files"], 5000);
+async function repoFiles(cwd: string, signal?: AbortSignal): Promise<number | undefined> {
+  const r = await runCapture(["git", "-C", cwd, "ls-files"], 5000, { signal });
   return r.exitCode === 0 ? r.stdout.split("\n").filter(Boolean).length : undefined;
 }
 
 const ProjectConfig = z.object({ verify: z.string().optional() });
-function projectVerify(cwd: string): string | undefined {
-  const p = join(cwd, ".router.json");
-  if (!existsSync(p)) return;
+/** `error` is set for a present but unreadable/invalid `.router.json`; a missing file is just no verify. */
+function projectVerify(cwd: string): { command?: string; error?: string } {
   try {
-    return ProjectConfig.parse(JSON.parse(readFileSync(p, "utf8"))).verify;
-  } catch {
-    return; // ponytail: a malformed .router.json silently means no verify; surface it if this bites
+    const r = ProjectConfig.safeParse(JSON.parse(readFileSync(join(cwd, ".router.json"), "utf8")));
+    return r.success ? { command: r.data.verify } : { error: r.error.issues[0]?.message ?? "invalid" };
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ENOENT" ? {} : { error: errMsg(e) };
   }
 }
 
@@ -111,7 +102,7 @@ function trustedHashes(): string[] {
 
 /** Adds the hash of the repo's `.router.json` verify command to trusted.json. Undefined when the repo has none. */
 export function trustProject(cwd: string): { command: string } | undefined {
-  const command = projectVerify(resolve(cwd));
+  const { command } = projectVerify(resolve(cwd));
   if (!command) return;
   const all = trustedHashes();
   if (!all.includes(hash(command))) writeFileSync(trustFile(), JSON.stringify([...all, hash(command)], null, 2));
@@ -121,7 +112,8 @@ export function trustProject(cwd: string): { command: string } | undefined {
 /** `--verify` is always honored; a `.router.json` verify runs only when its hash is trusted. */
 function resolveVerify(explicit: string | undefined, cwd: string): { command?: string; notice?: string } {
   if (explicit) return { command: explicit };
-  const command = projectVerify(cwd);
+  const { command, error } = projectVerify(cwd);
+  if (error) return { notice: `ignored .router.json: ${error}` };
   if (!command) return {};
   if (trustedHashes().includes(hash(command))) return { command };
   return { notice: `.router.json verify \`${command}\` is not trusted, so it was not run (outcome stays unknown). To allow it: router trust --cwd ${cwd}` };
@@ -130,14 +122,8 @@ function resolveVerify(explicit: string | undefined, cwd: string): { command?: s
 export const editNotice = (adapter: string) => `${adapter} edit mode runs shell commands with your user privileges (no OS sandbox)`;
 
 async function runVerify(cmd: string, cwd: string, signal?: AbortSignal) {
-  try {
-    const proc = Bun.spawn(["sh", "-c", cmd], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", signal, timeout: VERIFY_TIMEOUT_MS });
-    const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-    const exitCode = proc.signalCode ? null : code;
-    return { ok: exitCode === 0, exitCode, output: (out + err).trim().slice(-2000) };
-  } catch (e) {
-    return { ok: false, exitCode: null, output: errMsg(e) };
-  }
+  const r = await runCapture(["sh", "-c", cmd], VERIFY_TIMEOUT_MS, { cwd, signal });
+  return { ok: r.exitCode === 0, exitCode: r.exitCode, output: (r.stdout + r.stderr).trim().slice(-2000) };
 }
 
 interface Try { route: Route; resumeId?: string }
@@ -154,8 +140,11 @@ async function* execute(
 
   let ran: { route: Route; costUsd?: number; latencyMs: number } | undefined;
   let lastReason = "no route";
+  let lastTried: Route | undefined;
+  let spent: number | undefined;
+  const t00 = Date.now();
   for (const [i, t] of tries.entries()) {
-    yield { type: "route", route: t.route, index: i };
+    yield { type: "route", route: t.route };
     if (o.autonomy === "edit" && t.route.adapter !== "codex") yield { type: "notice", message: editNotice(t.route.adapter) };
     const adapter = o.adapters.find((a) => a.id === t.route.adapter);
     const req = { prompt: o.prompt, cwd: s.cwd, model: t.route.model, effort: t.route.effort, autonomy: o.autonomy };
@@ -177,7 +166,7 @@ async function* execute(
       yield emit({ type: "error", message: errMsg(e) });
     }
     if (signal.aborted) {
-      yield { type: "phase", phase: "failed", message: "aborted" };
+      yield ABORTED;
       return;
     }
     // exit before any assistant output = start failure, so try the next route; anything else ran.
@@ -186,14 +175,19 @@ async function* execute(
       break;
     }
     lastReason = st.reason ?? "no output";
+    if (st.costUsd !== undefined) spent = (spent ?? 0) + st.costUsd;
+    lastTried = t.route;
     const next = tries[i + 1];
     if (next) {
-      appendEvent(s.id, { type: "error", message: `${t.route.adapter}/${t.route.model} failed to start (${lastReason}); falling back to ${next.route.adapter}/${next.route.model}` });
-      yield { type: "fallback", from: t.route, to: next.route, reason: lastReason };
+      yield emit({ type: "error", message: `fallback: ${lastReason} -> ${next.route.adapter}/${next.route.model}` });
       saveSession({ ...s, route: next.route });
     }
   }
   if (!ran) {
+    // Start failures are availability, not quality: record one `unknown` outcome only so the session can be listed and rated.
+    if (!o.prev && lastTried) {
+      appendOutcome({ sessionId: s.id, ts: new Date().toISOString(), route: lastTried, tier: s.tier, result: "unknown", costUsd: spent, latencyMs: Date.now() - t00 });
+    }
     yield { type: "phase", phase: "failed", message: `no route started: ${lastReason}` };
     return;
   }
@@ -202,10 +196,10 @@ async function* execute(
   // On resume, a previously rated/verified result stands unless verify re-ran; cost and latency accumulate.
   let result: OutcomeResult = o.prev?.result ?? "unknown";
   if (verifyCmd) {
-    yield { type: "phase", phase: "verifying" };
+    yield { type: "phase", phase: "verifying", message: verifyCmd };
     const v = await runVerify(verifyCmd, s.cwd, signal);
     if (signal.aborted) {
-      yield { type: "phase", phase: "failed", message: "aborted" };
+      yield ABORTED;
       return;
     }
     yield { type: "verify", command: verifyCmd, ...v };
@@ -226,7 +220,10 @@ async function* plan(prompt: string, opts: RunOptions): AsyncGenerator<RunUpdate
 
   const evidence = loadEvidence();
   const roster = await buildRoster(adapters, { evidence });
-  yield { type: "roster", roster };
+  if (opts.signal?.aborted) {
+    yield ABORTED;
+    return;
+  }
 
   let classification: Classification;
   let source: "heuristic" | "llm" | "override" = "heuristic";
@@ -234,9 +231,15 @@ async function* plan(prompt: string, opts: RunOptions): AsyncGenerator<RunUpdate
     classification = { tier: opts.tier, confidence: 1, reasons: ["--tier override"] };
     source = "override";
   } else {
-    const base = opts.llm === false ? undefined : (opts.llm ?? loopClassifier(roster, evidence));
-    const llm = base && (async (p: string) => { const r = await base(p); source = "llm"; return r; });
-    classification = await classify(prompt, { repoFiles: await repoFiles(cwd) }, llm);
+    const files = await repoFiles(cwd, opts.signal);
+    const found = opts.llm === false ? undefined : opts.llm ? { label: "classifier", fn: opts.llm } : loopClassifier(roster, evidence, opts.signal);
+    const llm = found && (async (p: string) => { const r = await found.fn(p); source = "llm"; return r; });
+    if (found && classifyHeuristic(prompt, { repoFiles: files }).confidence < 0.6) yield { type: "phase", phase: "classifying", message: `asking ${found.label}...` };
+    classification = await classify(prompt, { repoFiles: files }, llm);
+  }
+  if (opts.signal?.aborted) {
+    yield ABORTED;
+    return;
   }
   yield { type: "classification", classification, source };
 
@@ -258,7 +261,13 @@ async function* plan(prompt: string, opts: RunOptions): AsyncGenerator<RunUpdate
     return;
   }
 
-  const session = createSession({ cwd, prompt, route: candidates[0]!.route, tier: classification.tier, autonomy });
+  const session = createSession({
+    cwd, prompt, route: candidates[0]!.route, tier: classification.tier, autonomy,
+    decision: {
+      tier: classification.tier, confidence: classification.confidence, reasons: classification.reasons, source,
+      candidates: candidates.slice(0, 5).map((c) => ({ ...c.route, score: c.score, costUsd: evidence.models[resolveModel(evidence, c.route.model)]?.costPerTask })),
+    },
+  });
   yield { type: "started", sessionId: session.id };
   yield* execute(session, candidates.slice(0, MAX_FALLBACKS + 1).map((c) => ({ route: c.route })), { prompt, verify: opts.verify, autonomy, signal: opts.signal, adapters });
 }
@@ -281,7 +290,7 @@ async function* resume(id: string, prompt: string, opts: RunOptions): AsyncGener
   const s = getSession(id);
   if (!s) throw new Error(`no such session: ${id}`);
   const adapter = adapters.find((a) => a.id === s.route.adapter);
-  if (!adapter?.capabilities.resume || !adapter.resume) throw new Error(`resume is unsupported for adapter ${s.route.adapter}`);
+  if (!adapter?.resume) throw new Error(`resume is unsupported for adapter ${s.route.adapter}`);
   if (!s.nativeSessionId) throw new Error(`session ${s.id} has no native session id to resume`);
   yield { type: "started", sessionId: s.id };
   // Reuse the original autonomy, but never silently escalate to full: that needs the explicit flag every run.

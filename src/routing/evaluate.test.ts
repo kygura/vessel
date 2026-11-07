@@ -64,13 +64,12 @@ test("failures push a model down, passes pull it up (shrinkage)", () => {
   expect(r2[0]!.route.model).toBe("model-c");
 });
 
-test("unknown outcomes and other tiers/routes are excluded; later line per session wins", () => {
+test("unknown outcomes and other tiers/routes are excluded", () => {
   const outs = [
     outcome("model-a", "unknown"),
     outcome("model-a", "fail", "hard"),
     outcome("model-a", "fail", "standard", "s-x", "codex"),
-    outcome("model-a", "fail", "standard", "dup"),
-    outcome("model-a", "pass", "standard", "dup"),
+    outcome("model-a", "pass", "standard"),
   ];
   const a = rank([ref("model-a")], "standard", { ...base, outcomes: outs })[0]!;
   expect(a.runs).toBe(1);
@@ -143,6 +142,8 @@ test("Pareto-dominated routes are dropped before normalization; pins bypass prun
   expect(r.map((c) => c.route.model).sort()).toEqual(["good", "mid"]);
   expect(r.find((c) => c.route.model === "mid")!.costNorm).toBe(1); // not stretched by "bad"
   expect(rank([ref("good"), ref("bad")], "standard", { evidence: ev, outcomes: [], rng: never, pins: { adapter: "claude" } })).toHaveLength(2);
+  // an effort pin does not bypass pruning
+  expect(rank([ref("good"), ref("bad")], "standard", { evidence: ev, outcomes: [], rng: never, pins: { effort: "low" } }).map((c) => c.route.model)).toEqual(["good"]);
   // equal prior and cost: neither dominates
   expect(rank([ref("good"), ref("good", "codex")], "standard", { evidence: ev, outcomes: [], rng: never })).toHaveLength(2);
 });

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Evidence } from "../core/config.ts";
@@ -56,9 +56,9 @@ test("adapters without model listing get evidence models for their provider", as
   expect(r.routes).toEqual([
     { adapter: "claude", model: "claude-x", provider: "anthropic" },
     { adapter: "claude", model: "claude-y", provider: "anthropic" },
-    { adapter: "codex", model: "gpt-x", provider: "openai" },
   ]);
-  expect(r.unavailable).toEqual([{ adapter: "droid", reason: "no models" }]);
+  // only claude borrows evidence; codex lists its own models
+  expect(r.unavailable).toEqual([{ adapter: "codex", reason: "no models" }, { adapter: "droid", reason: "no models" }]);
 });
 
 test("listed models are not replaced by evidence", async () => {
@@ -109,4 +109,20 @@ test("cache is ignored when evidence ids for fill providers change", async () =>
   const other: Evidence = { aliases: {}, models: { ...more.models, "kimi-y": e("moonshot") } };
   await buildRoster([a], { evidence: other, useCache: true, now: 3 });
   expect(a.calls).toBe(2);
+});
+
+test("cache key covers config.json content and which provider keys are set; unwritable cache is tolerated", async () => {
+  const a = fake("codex", ok({ adapter: "codex", model: "gpt-x" }));
+  await buildRoster([a], { evidence, useCache: true, now: 1 });
+  writeFileSync(join(home, "config.json"), JSON.stringify({ providers: { p: { kind: "openai", baseUrl: "https://x.test", apiKeyEnv: "ROUTER_TEST_KEY", models: ["m"] } } }));
+  await buildRoster([a], { evidence, useCache: true, now: 2 });
+  expect(a.calls).toBe(2);
+  process.env.ROUTER_TEST_KEY = "k";
+  try {
+    await buildRoster([a], { evidence, useCache: true, now: 3 });
+    expect(a.calls).toBe(3);
+  } finally { delete process.env.ROUTER_TEST_KEY; }
+  rmSync(join(home, "roster.json"));
+  mkdirSync(join(home, "roster.json")); // writeFileSync to a directory throws
+  expect((await buildRoster([a], { evidence, useCache: true, now: 4 })).routes).toHaveLength(1);
 });

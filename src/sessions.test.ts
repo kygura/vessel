@@ -29,4 +29,5 @@ test("session round-trip: events, native id, outcome merge, prefix lookup, listi
 
   const b = createSession({ cwd: "/x", prompt: "p2", route, tier: "hard" });
   expect(listSessions().map((s) => s.id).sort()).toEqual([a.id, b.id].sort());
+  expect(listSessions().find((s) => s.id === a.id)).toMatchObject({ nativeSessionId: "native-1", result: "pass" });
 });

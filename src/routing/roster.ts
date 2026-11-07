@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { z } from "zod";
-import type { Evidence } from "../core/config.ts";
+import { Config, type Evidence } from "../core/config.ts";
 import { routerPaths } from "../core/paths.ts";
 import { AdapterId, ModelRef, type Adapter, type ProbeResult } from "../core/types.ts";
 
@@ -8,7 +8,7 @@ export interface Roster { routes: ModelRef[]; unavailable: { adapter: AdapterId;
 
 const CACHE_TTL_MS = 10 * 60_000;
 /** CLI adapters with no model-list command borrow evidence entries of this provider. Evidence aliases are only name resolution (see evaluate.resolve), never extra routes. */
-const PROVIDER_OF: Partial<Record<AdapterId, string>> = { claude: "anthropic", codex: "openai" };
+const PROVIDER_OF: Partial<Record<AdapterId, string>> = { claude: "anthropic" };
 
 const Cache = z.object({
   ts: z.number(),
@@ -23,8 +23,18 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
+/** Config content + which provider API keys are set: either changing invalidates the cached loop routes. */
+function configKey(configPath: string): string {
+  try {
+    const text = readFileSync(configPath, "utf8");
+    const envs = Object.values(Config.parse(JSON.parse(text)).providers).map((p) => p.apiKeyEnv).filter((e) => process.env[e]).sort();
+    return `${Bun.hash(text)}:${envs.join()}`;
+  } catch {
+    return "none"; // missing or invalid config: loop probe reports it itself
+  }
+}
+
 function readCache(path: string, key: string, now: number): Roster | undefined {
-  if (!existsSync(path)) return;
   try {
     const c = Cache.parse(JSON.parse(readFileSync(path, "utf8")));
     if (now - c.ts < CACHE_TTL_MS && c.key === key) return { routes: c.routes, unavailable: c.unavailable };
@@ -40,7 +50,7 @@ export async function buildRoster(
   // key: adapter set + evidence ids of the providers used to fill model lists
   const fillProviders = new Set(Object.values(PROVIDER_OF));
   const fillIds = Object.entries(evidence.models).filter(([, m]) => fillProviders.has(m.provider)).map(([id]) => id).sort();
-  const key = `${adapters.map((a) => a.id).sort().join()}|${Bun.hash(fillIds.join())}`;
+  const key = `${adapters.map((a) => a.id).sort().join()}|${Bun.hash(fillIds.join())}|${configKey(routerPaths().config)}`;
   if (useCache) {
     const hit = readCache(cachePath, key, now);
     if (hit) return hit;
@@ -71,6 +81,10 @@ export async function buildRoster(
     else roster.routes.push(...models);
   });
 
-  if (!failed) writeFileSync(cachePath, JSON.stringify({ ts: now, key, ...roster }));
+  if (!failed) {
+    try {
+      writeFileSync(cachePath, JSON.stringify({ ts: now, key, ...roster }));
+    } catch { /* the cache is optional (read-only home etc.) */ }
+  }
   return roster;
 }

@@ -5,30 +5,31 @@ import { parseArgs } from "node:util";
 import { ADAPTERS } from "./adapters/index.ts";
 import { PI_SANDBOX_NOTE } from "./adapters/pi.ts";
 import { loadEvidence } from "./core/config.ts";
+import { errMsg } from "./core/proc.ts";
 import { Autonomy, Effort, Tier, type RouterEvent, type SessionRecord } from "./core/types.ts";
+import { duration, trunc, usd } from "./format.ts";
 import { type RunUpdate, editNotice, rateSession, resumeTask, runTask, trustProject } from "./run.ts";
 import { buildRoster } from "./routing/roster.ts";
 import { getSession, listSessions, readEvents } from "./sessions.ts";
 
-const HELP = `router - route coding tasks to the best reachable agent CLI + model
-
-  router                         open the TUI
-  router run "<task>" [--dry-run] [--verify CMD] [--tier trivial|standard|hard]
-             [--adapter ID] [--model M] [--effort low|medium|high]
-             [--autonomy read|edit|full] [--cwd DIR]
-  router roster                  reachable routes and why others are unavailable
-  router sessions                list sessions
-  router logs <id>               print a session's event log
-  router resume <id> "<prompt>" [--verify CMD] [--autonomy read|edit|full]
-                                 continue a session on the same route
-  router trust [--cwd DIR]       trust the verify command in DIR/.router.json
-  router rate <id> pass|fail     label a session's outcome`;
-
-const oneLine = (s: string, n: number) => {
-  const t = s.replace(/\s+/g, " ").trim();
-  return t.length > n ? `${t.slice(0, n - 1)}…` : t;
+const USAGE: Record<string, string> = {
+  run: `router run "<task>" [--dry-run] [--verify CMD] [--tier trivial|standard|hard]
+           [--adapter ID] [--model M] [--effort low|medium|high]
+           [--autonomy read|edit|full] [--cwd DIR]
+  Route the task to the best reachable agent CLI + model and run it. --dry-run stops after the ranked table.`,
+  roster: "router roster\n  Reachable routes, and why each unavailable adapter is unavailable.",
+  sessions: "router sessions\n  List sessions: id, time, task, route, tier, outcome, cost.",
+  logs: "router logs <id>\n  Print a session's event log (id or unique prefix).",
+  resume: `router resume <id> "<prompt>" [--verify CMD] [--autonomy read|edit|full]
+  Continue a session on the same route via the adapter's native resume.`,
+  rate: "router rate <id> pass|fail\n  Label a finished session's outcome.",
+  trust: "router trust [--cwd DIR]\n  Trust the verify command in DIR/.router.json so runs execute it.",
+  tui: "router [tui]\n  Open the TUI.",
 };
-const money = (n?: number) => (n === undefined ? "-" : `$${n.toFixed(4)}`);
+const HELP = `router - route coding tasks to the best reachable agent CLI + model\n\n${Object.values(USAGE).join("\n\n")}\n\nrouter help <command> shows one command.`;
+
+/** Single-line, truncated view of free text. */
+const line = (s: string, n: number) => trunc(s.replace(/\s+/g, " ").trim(), n);
 const table = (rows: string[][]) => {
   const w = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)));
   return rows.map((r) => r.map((c, i) => c.padEnd(w[i]!)).join("  ").trimEnd()).join("\n");
@@ -41,10 +42,10 @@ const fail = (msg: string): never => {
 function formatEvent(e: RouterEvent): string | undefined {
   switch (e.type) {
     case "session": return `session ${e.id}`;
-    case "text": return `  ${oneLine(e.text, 160)}`;
-    case "tool": return `  [${e.name}] ${e.status}${e.input ? ` ${oneLine(e.input, 100)}` : ""}${e.output ? ` -> ${oneLine(e.output, 100)}` : ""}`;
-    case "usage": return `usage in=${e.inputTokens ?? "?"} out=${e.outputTokens ?? "?"}${e.costUsd !== undefined ? ` cost=${money(e.costUsd)}` : ""}`;
-    case "error": return `! ${oneLine(e.message, 200)}`;
+    case "text": return `  ${line(e.text, 160)}`;
+    case "tool": return `  [${e.name}] ${e.status}${e.input ? ` ${line(e.input, 100)}` : ""}${e.output ? ` -> ${line(e.output, 100)}` : ""}`;
+    case "usage": return `usage in=${e.inputTokens ?? "?"} out=${e.outputTokens ?? "?"}${e.costUsd !== undefined ? ` cost=${usd(e.costUsd)}` : ""}`;
+    case "error": return `! ${line(e.message, 200)}`;
     case "done": return `done ok=${e.ok}`;
   }
 }
@@ -62,11 +63,10 @@ async function print(updates: AsyncIterable<RunUpdate>): Promise<number> {
       case "ranked":
         console.log(table([
           ["", "adapter", "model", "effort", "score", "prior", "local", "runs"],
-          ...u.candidates.map((c, i) => [i === 0 ? "*" : "", c.route.adapter, c.route.model, c.route.effort, c.score.toFixed(3), c.prior.toFixed(2), c.local.toFixed(2), String(c.runs)]),
+          ...u.candidates.map((c, i) => [i === 0 ? "*" : c.explored ? "~" : "", c.route.adapter, c.route.model, c.route.effort, c.score.toFixed(3), c.prior.toFixed(2), c.local.toFixed(2), String(c.runs)]),
         ]));
         break;
       case "route": console.log(`running on ${u.route.adapter}/${u.route.model} (${u.route.effort})`); break;
-      case "fallback": console.log(`! ${u.from.adapter}/${u.from.model} failed to start: ${oneLine(u.reason, 160)}; falling back to ${u.to.adapter}/${u.to.model}`); break;
       case "event": { const l = formatEvent(u.event); if (l) console.log(l); break; }
       case "verify":
         console.log(`verify: ${u.command} -> exit ${u.exitCode ?? "signal"}`);
@@ -74,14 +74,13 @@ async function print(updates: AsyncIterable<RunUpdate>): Promise<number> {
         break;
       case "outcome": {
         const o = u.outcome;
-        console.log(`outcome: ${o.result}  cost ${money(o.costUsd)}  ${(o.latencyMs / 1000).toFixed(1)}s  route ${o.route.adapter}/${o.route.model}`);
+        console.log(`outcome: ${o.result}  cost ${usd(o.costUsd)}  ${duration(o.latencyMs)}  route ${o.route.adapter}/${o.route.model}`);
         break;
       }
       case "phase":
         if (u.phase === "failed") { console.error(`failed${u.message ? `: ${u.message}` : ""}`); code = 1; }
         break;
       case "notice": console.log(`note: ${u.message}`); break;
-      case "roster": break;
     }
   }
   return code;
@@ -134,7 +133,7 @@ async function cmdRoster() {
 
 function cmdSessions() {
   const rows = listSessions().map((s: SessionRecord) => [
-    s.id, s.createdAt.slice(0, 16).replace("T", " "), oneLine(s.prompt, 40), `${s.route.adapter}/${s.route.model}`, s.tier, s.result ?? "-", money(s.costUsd),
+    s.id, s.createdAt.slice(0, 16).replace("T", " "), line(s.prompt, 40), `${s.route.adapter}/${s.route.model}`, s.tier, s.result ?? "-", usd(s.costUsd),
   ]);
   if (!rows.length) return console.log("no sessions");
   console.log(table([["id", "time", "task", "route", "tier", "outcome", "cost"], ...rows]));
@@ -143,7 +142,7 @@ function cmdSessions() {
 function cmdLogs(id: string | undefined) {
   const s = id ? getSession(id) : undefined;
   if (!s) return fail(`no such session: ${id ?? ""}`);
-  console.log(`${s.id}  ${s.route.adapter}/${s.route.model}  ${s.tier}  ${s.cwd}\n  ${oneLine(s.prompt, 200)}`);
+  console.log(`${s.id}  ${s.route.adapter}/${s.route.model}  ${s.tier}  ${s.cwd}\n  ${line(s.prompt, 200)}`);
   for (const { ts, event } of readEvents(s.id)) {
     const l = formatEvent(event);
     if (l) console.log(`${ts.slice(11, 19)} ${l}`);
@@ -158,10 +157,14 @@ async function cmdTui() {
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
+if (cmd === "help" || cmd === "--help" || cmd === "-h" || rest.includes("--help") || rest.includes("-h")) {
+  const topic = cmd === "help" ? rest[0] : cmd;
+  console.log((topic && USAGE[topic]) || HELP);
+  process.exit(0);
+}
 try {
   switch (cmd) {
     case undefined: case "tui": await cmdTui(); break;
-    case "help": case "--help": case "-h": console.log(HELP); break;
     case "roster": await cmdRoster(); break;
     case "sessions": cmdSessions(); break;
     case "logs": cmdLogs(rest[0]); break;
@@ -196,6 +199,6 @@ try {
     default: console.error(`unknown command: ${cmd}\n\n${HELP}`); process.exitCode = 2;
   }
 } catch (e) {
-  console.error(e instanceof Error ? e.message : String(e));
+  console.error(errMsg(e));
   process.exitCode = 1;
 }
