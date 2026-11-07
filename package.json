@@ -7,7 +7,7 @@
     "router": "src/cli.ts"
   },
   "scripts": {
-    "test": "bun test",
+    "test": "! grep -rnE '\\.only\\(' src && bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
