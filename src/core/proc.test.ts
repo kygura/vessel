@@ -1,5 +1,14 @@
 import { expect, test } from "bun:test";
-import { runCapture, spawnJsonl } from "./proc.ts";
+import { liveGroups, runCapture, spawnJsonl } from "./proc.ts";
+
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 test("spawnJsonl yields json, raw for malformed, skips blanks, reports exit", async () => {
   const { lines, exit } = spawnJsonl(["sh", "-c", `printf '{"a":1}\\nnot json\\n\\n{"b":2}'; echo oops >&2; exit 3`]);
@@ -52,4 +61,60 @@ test("spawnJsonl kill + rolling stderr tail", async () => {
   expect(e.exitCode).toBeNull();
   expect(e.stderrTail.length).toBe(2000);
   expect(e.stderrTail.endsWith("end\n")).toBe(true);
+});
+
+test("runCapture keep: tail retains the end of large output", async () => {
+  const cmd = "head -c 1500000 /dev/zero | tr '\\0' a; echo FAILED-SUMMARY";
+  const tail = await runCapture(["sh", "-c", cmd], 10_000, { keep: "tail" });
+  expect(tail.stdout.endsWith("FAILED-SUMMARY\n")).toBe(true);
+  expect(tail.stdout.length).toBe(1_000_000);
+  const head = await runCapture(["sh", "-c", cmd], 10_000);
+  expect(head.stdout.includes("FAILED-SUMMARY")).toBe(false);
+  expect(head.stdout.length).toBe(1_000_000);
+});
+
+test("runCapture: fast exit is never reported as timedOut", async () => {
+  expect(await runCapture(["true"], 50)).toMatchObject({ exitCode: 0, timedOut: false });
+});
+
+test("spawnJsonl: slow consumer still gets the final line after exit + grace", async () => {
+  const p = spawnJsonl(["sh", "-c", `for i in 1 2 3; do echo '{"n":'$i'}'; done; echo '{"type":"result"}'`]);
+  const got: unknown[] = [];
+  for await (const l of p.lines) {
+    got.push(l.json);
+    await Bun.sleep(1000); // > 3s total, past the 2s grace
+  }
+  expect(got.at(-1)).toEqual({ type: "result" });
+  expect(got).toHaveLength(4);
+}, 10_000);
+
+test("spawnJsonl kill reaches a grandchild; registry empties after exit", async () => {
+  const p = spawnJsonl(["sh", "-c", "sleep 30 & echo $!; wait"]);
+  let gc = 0;
+  for await (const l of p.lines) {
+    gc = Number(l.raw);
+    p.kill();
+  }
+  await p.exit;
+  await Bun.sleep(50);
+  expect(alive(gc)).toBe(false);
+  const q = spawnJsonl(["true"]);
+  for await (const _ of q.lines) {}
+  await q.exit;
+  await Bun.sleep(10);
+  expect(liveGroups().size).toBe(0);
+});
+
+test("SIGINT kills live groups, then the default action still terminates us", async () => {
+  const script = `import { spawnJsonl } from ${JSON.stringify(import.meta.dir + "/proc.ts")};
+const p = spawnJsonl(["sh", "-c", "sleep 30 & echo $!; wait"]);
+for await (const l of p.lines) { console.log(l.raw); }`;
+  const child = Bun.spawn(["bun", "-e", script], { stdout: "pipe", stderr: "inherit" });
+  const reader = child.stdout.pipeThrough(new TextDecoderStream()).getReader();
+  const gc = Number((await reader.read()).value?.trim());
+  child.kill("SIGINT");
+  await child.exited;
+  expect(child.signalCode).toBe("SIGINT");
+  await Bun.sleep(50);
+  expect(alive(gc)).toBe(false);
 });

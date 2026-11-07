@@ -7,16 +7,68 @@ const PIPE_GRACE_MS = 2000;
 
 export const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+const live = new Set<number>();
+let handlersInstalled = false;
+
+function killGroup(pid: number): void {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // group already gone
+  }
+}
+
+/** Process groups currently tracked for cleanup (exported for tests). */
+export function liveGroups(): ReadonlySet<number> {
+  return live;
+}
+
 /**
- * Yields decoded chunks until the stream ends, or until `exited` resolves plus a grace period:
- * a grandchild that inherited the pipe would otherwise keep it open (and us waiting) forever.
+ * Children run detached in their own process group (so a kill reaches grandchildren), which also
+ * means terminal Ctrl-C no longer reaches them. Live groups are therefore killed when we exit or get
+ * SIGINT/SIGTERM. If we are the only listener for the signal, the default action is re-raised after.
+ */
+function track(pid: number): void {
+  live.add(pid);
+  if (handlersInstalled) return;
+  handlersInstalled = true;
+  const killAll = () => {
+    for (const g of live) killGroup(g);
+    live.clear();
+  };
+  process.on("exit", killAll);
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    const onSig = () => {
+      killAll();
+      if (process.listenerCount(sig) === 1) {
+        process.removeListener(sig, onSig);
+        process.kill(process.pid, sig);
+      }
+    };
+    process.on(sig, onSig);
+  }
+}
+
+/** After the leader exits and its pipes are drained (or the grace expired), kill leftovers and forget the group. */
+function reap(pid: number, done: Promise<unknown>): void {
+  done.finally(() => {
+    killGroup(pid);
+    live.delete(pid);
+  });
+}
+
+/**
+ * Yields decoded chunks until the stream ends. Once the leader has exited, a read that stays blocked
+ * for the grace period ends the stream: a grandchild holding the pipe would otherwise hang us forever.
+ * Data already buffered is still delivered however slowly the consumer reads.
  */
 async function* chunks(stream: ReadableStream, exited: Promise<unknown>): AsyncGenerator<string> {
   const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
-  const gone = exited.then(() => Bun.sleep(PIPE_GRACE_MS)).then(() => null);
   try {
     for (;;) {
-      const r = await Promise.race([reader.read(), gone]);
+      let timer: Timer | undefined;
+      const grace = exited.then(() => new Promise<null>((r) => (timer = setTimeout(() => r(null), PIPE_GRACE_MS))));
+      const r = await Promise.race([reader.read(), grace]).finally(() => clearTimeout(timer));
       if (!r || r.done) return;
       yield r.value;
     }
@@ -25,48 +77,41 @@ async function* chunks(stream: ReadableStream, exited: Promise<unknown>): AsyncG
   }
 }
 
-/** Drains a stream keeping only the last `max` chars (bounded memory for chatty stderr). */
-async function tail(stream: ReadableStream, exited: Promise<unknown>, max: number): Promise<string> {
+/** Drains a stream keeping the first (`head`) or last (`tail`) `max` chars; the rest is discarded. */
+async function collect(stream: ReadableStream, exited: Promise<unknown>, max: number, keep: "head" | "tail"): Promise<string> {
   let s = "";
-  for await (const chunk of chunks(stream, exited)) s = (s + chunk).slice(-max);
+  for await (const chunk of chunks(stream, exited)) {
+    if (keep === "tail") s = (s + chunk).slice(-max);
+    else if (s.length < max) s = (s + chunk).slice(0, max);
+  }
   return s;
 }
 
-/**
- * Drains a stream keeping the first `max` chars (rest read and discarded so the child never blocks).
- * Reports progress through `set`, so a caller that stops waiting still has what arrived.
- */
-async function head(stream: ReadableStream, max: number, set: (s: string) => void): Promise<void> {
-  let s = "";
-  for await (const chunk of stream.pipeThrough(new TextDecoderStream())) {
-    if (s.length >= max) continue;
-    s += chunk;
-    set(s.length > max ? `${s.slice(0, max)}\n...[truncated]` : s);
-  }
+function spawnDetached(argv: string[], opts: { cwd?: string; env?: Record<string, string | undefined> }) {
+  const proc = Bun.spawn(argv, { cwd: opts.cwd, env: opts.env, detached: true, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  track(proc.pid);
+  return proc;
 }
 
 /**
- * Spawns argv and yields each non-empty stdout line, parsed as JSON when possible.
- * `exit` resolves after the process ends; `kill()` is safe to call any time (no-op once exited).
- * Throws synchronously if the binary cannot be spawned.
+ * Spawns argv (own process group) and yields each non-empty stdout line, parsed as JSON when possible.
+ * `exit` resolves after the process ends; `kill()` SIGKILLs the whole group and is safe any time.
+ * Abort via `signal` does the same. Throws synchronously if the binary cannot be spawned.
  */
 export function spawnJsonl(
   argv: string[],
   opts: { cwd?: string; env?: Record<string, string | undefined>; signal?: AbortSignal } = {},
 ): { lines: AsyncIterable<JsonlLine>; exit: Promise<ProcExit>; kill: () => void } {
-  const proc = Bun.spawn(argv, {
-    cwd: opts.cwd,
-    env: opts.env,
-    signal: opts.signal,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
+  const proc = spawnDetached(argv, opts);
+  const kill = () => killGroup(proc.pid);
+  if (opts.signal?.aborted) kill();
+  opts.signal?.addEventListener("abort", kill, { once: true });
+  const stderr = collect(proc.stderr, proc.exited, STDERR_TAIL, "tail");
+  const exit = Promise.all([proc.exited, stderr]).then(([code, err]) => {
+    opts.signal?.removeEventListener("abort", kill);
+    return { exitCode: proc.signalCode ? null : code, stderrTail: err };
   });
-  const stderr = tail(proc.stderr, proc.exited, STDERR_TAIL);
-  const exit = Promise.all([proc.exited, stderr]).then(([code, err]) => ({
-    exitCode: proc.signalCode ? null : code,
-    stderrTail: err,
-  }));
+  reap(proc.pid, exit);
 
   async function* lines(): AsyncGenerator<JsonlLine> {
     let buf = "";
@@ -83,7 +128,7 @@ export function spawnJsonl(
     if (last) yield last;
   }
 
-  return { lines: lines(), exit, kill: () => proc.kill("SIGKILL") };
+  return { lines: lines(), exit, kill };
 }
 
 function toLine(s: string): JsonlLine | undefined {
@@ -100,53 +145,42 @@ export type Capture = { exitCode: number | null; stdout: string; stderr: string;
 
 /**
  * Runs argv to completion. Never throws: spawn failure, timeout or abort yield exitCode null.
- * The child gets its own process group; on timeout/abort the whole group is SIGKILLed. Output reads
- * get a short grace after exit so a grandchild still holding the pipes cannot hang the caller.
- * stdout/stderr are capped at ~1MB each.
+ * The child gets its own process group; on timeout/abort the whole group is SIGKILLed. A grandchild
+ * still holding the pipes after exit gets the read grace, then is killed. stdout/stderr keep ~1MB each,
+ * from the start (`keep: "head"`, default) or the end (`"tail"`, e.g. test failure summaries).
  */
 export async function runCapture(
   argv: string[],
   timeoutMs: number,
-  opts: { cwd?: string; signal?: AbortSignal; env?: Record<string, string | undefined> } = {},
+  opts: { cwd?: string; signal?: AbortSignal; env?: Record<string, string | undefined>; keep?: "head" | "tail" } = {},
 ): Promise<Capture> {
-  let proc: ReturnType<typeof Bun.spawn<"ignore", "pipe", "pipe">>;
+  let proc: ReturnType<typeof spawnDetached>;
   try {
-    proc = Bun.spawn(argv, { cwd: opts.cwd, env: opts.env, detached: true, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    proc = spawnDetached(argv, opts);
   } catch (e) {
     return { exitCode: null, stdout: "", stderr: errMsg(e), timedOut: false };
   }
   let timedOut = false;
-  const killGroup = () => {
-    try {
-      process.kill(-proc.pid, "SIGKILL");
-    } catch {
-      proc.kill("SIGKILL"); // group already gone or unsupported platform
-    }
+  let killed = false;
+  const kill = () => {
+    killed = true;
+    killGroup(proc.pid);
   };
-  const onAbort = () => killGroup();
-  if (opts.signal?.aborted) killGroup();
-  opts.signal?.addEventListener("abort", onAbort, { once: true });
+  if (opts.signal?.aborted) kill();
+  opts.signal?.addEventListener("abort", kill, { once: true });
   const timer = setTimeout(() => {
     timedOut = true;
-    killGroup();
+    kill();
   }, timeoutMs);
-
-  const out = { stdout: "", stderr: "" };
+  const keep = opts.keep ?? "head";
   const reads = Promise.all([
-    head(proc.stdout, CAPTURE_MAX, (s) => (out.stdout = s)),
-    head(proc.stderr, CAPTURE_MAX, (s) => (out.stderr = s)),
-  ]).then(
-    () => true,
-    () => true,
-  );
-  try {
-    const code = await proc.exited;
-    const drained = await Promise.race([reads, Bun.sleep(PIPE_GRACE_MS).then(() => false)]);
-    if (!drained) killGroup(); // leftover grandchildren still hold the pipes
-    const killed = proc.signalCode !== null || timedOut || !!opts.signal?.aborted;
-    return { exitCode: killed ? null : code, ...out, timedOut };
-  } finally {
-    clearTimeout(timer);
-    opts.signal?.removeEventListener("abort", onAbort);
-  }
+    collect(proc.stdout, proc.exited, CAPTURE_MAX, keep),
+    collect(proc.stderr, proc.exited, CAPTURE_MAX, keep),
+  ]);
+  reap(proc.pid, reads.catch(() => {}));
+  const code = await proc.exited;
+  clearTimeout(timer);
+  opts.signal?.removeEventListener("abort", kill);
+  const [stdout, stderr] = await reads.catch(() => ["", ""]);
+  return { exitCode: killed || proc.signalCode !== null ? null : code, stdout, stderr, timedOut };
 }
