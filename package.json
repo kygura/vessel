@@ -1,0 +1,20 @@
+{
+  "name": "router",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "router": "src/cli.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}
