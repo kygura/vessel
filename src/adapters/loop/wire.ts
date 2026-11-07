@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { ProviderConfig } from "../../core/config.ts";
-import type { ToolDef } from "./tools.ts";
+import { type ToolDef, redact } from "./tools.ts";
 
 export type ToolCall = { id: string; name: string; input: unknown };
 export type Msg =
@@ -8,7 +8,15 @@ export type Msg =
   | { role: "assistant"; text: string; calls: ToolCall[] }
   | { role: "tool"; results: { id: string; output: string; isError: boolean }[] };
 export type Reply = { text: string; calls: ToolCall[]; inputTokens?: number; outputTokens?: number };
-export type CallOpts = { provider: ProviderConfig; apiKey: string; model: string; system?: string; signal?: AbortSignal };
+/** secrets: extra values (other providers' keys) redacted from errors alongside apiKey. */
+export type CallOpts = {
+  provider: ProviderConfig;
+  apiKey: string;
+  model: string;
+  system?: string;
+  signal?: AbortSignal;
+  secrets?: string[];
+};
 
 const MAX_TOKENS = 8192;
 const SNIPPET = 500;
@@ -36,27 +44,34 @@ const OpenAIResponse = z.object({
   usage: z.object({ prompt_tokens: z.number(), completion_tokens: z.number() }).partial().nullish(),
 });
 
+function secretsOf(o: CallOpts): string[] {
+  return [o.apiKey, ...(o.secrets ?? [])];
+}
+
 function url(base: string, path: string): string {
   return base.replace(/\/+$/, "") + path;
 }
 
-/** POSTs JSON. Non-2xx throws with status + a body snippet; the key is redacted and headers are never included. */
-async function post(endpoint: string, headers: Record<string, string>, body: unknown, apiKey: string, signal?: AbortSignal) {
+/**
+ * POSTs JSON. Non-2xx throws with status + a body snippet; headers are never included. Redirects are
+ * errors so the key header is never replayed to another host. Body is redacted before slicing so a
+ * key straddling the cut cannot leak a prefix.
+ */
+async function post(endpoint: string, headers: Record<string, string>, body: unknown, o: CallOpts) {
   const res = await fetch(endpoint, {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
-    signal,
+    redirect: "error",
+    signal: o.signal,
   });
   const text = await res.text();
-  if (!res.ok) {
-    const snippet = (apiKey ? text.split(apiKey).join("[redacted]") : text).slice(0, SNIPPET);
-    throw new Error(`HTTP ${res.status} from ${new URL(endpoint).host}: ${snippet}`);
-  }
+  const snippet = () => redact(text, secretsOf(o)).slice(0, SNIPPET);
+  if (!res.ok) throw new Error(`HTTP ${res.status} from ${new URL(endpoint).host}: ${snippet()}`);
   try {
     return JSON.parse(text) as unknown;
   } catch {
-    throw new Error(`invalid JSON response: ${text.slice(0, SNIPPET)}`);
+    throw new Error(`invalid JSON response: ${snippet()}`);
   }
 }
 
@@ -84,7 +99,7 @@ async function callAnthropic(o: CallOpts, msgs: Msg[], tools: ToolDef[]): Promis
     ...(tools.length ? { tools: tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters })) } : {}),
   };
   const headers = { "x-api-key": o.apiKey, "anthropic-version": "2023-06-01" };
-  const r = AnthropicResponse.parse(await post(url(o.provider.baseUrl, "/v1/messages"), headers, body, o.apiKey, o.signal));
+  const r = AnthropicResponse.parse(await post(url(o.provider.baseUrl, "/v1/messages"), headers, body, o));
   return {
     text: r.content.flatMap((b) => (b.type === "text" && b.text ? [b.text] : [])).join(""),
     calls: r.content.flatMap((b) =>
@@ -121,7 +136,7 @@ async function callOpenAI(o: CallOpts, msgs: Msg[], tools: ToolDef[]): Promise<R
     ...(tools.length ? { tools: tools.map((t) => ({ type: "function", function: t })) } : {}),
   };
   const headers = { authorization: `Bearer ${o.apiKey}` };
-  const r = OpenAIResponse.parse(await post(url(o.provider.baseUrl, "/chat/completions"), headers, body, o.apiKey, o.signal));
+  const r = OpenAIResponse.parse(await post(url(o.provider.baseUrl, "/chat/completions"), headers, body, o));
   const msg = r.choices[0]!.message;
   return {
     text: msg.content ?? "",
@@ -139,6 +154,12 @@ async function callOpenAI(o: CallOpts, msgs: Msg[], tools: ToolDef[]): Promise<R
   };
 }
 
-export function callModel(o: CallOpts, msgs: Msg[], tools: ToolDef[]): Promise<Reply> {
-  return o.provider.kind === "anthropic" ? callAnthropic(o, msgs, tools) : callOpenAI(o, msgs, tools);
+/** Every error leaving here (HTTP, network, JSON, schema) has known secrets redacted. */
+export async function callModel(o: CallOpts, msgs: Msg[], tools: ToolDef[]): Promise<Reply> {
+  try {
+    return await (o.provider.kind === "anthropic" ? callAnthropic(o, msgs, tools) : callOpenAI(o, msgs, tools));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(redact(msg, secretsOf(o)));
+  }
 }

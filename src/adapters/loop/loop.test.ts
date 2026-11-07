@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import type { RouterEvent, RunRequest } from "../../core/types.ts";
-import { complete, createLoopAdapter, loopAdapter } from "./index.ts";
+import { complete, createLoopAdapter, loopAdapter, providerProblem } from "./index.ts";
 import { guardPath, runTool, toolsFor } from "./tools.ts";
 
 const KEY = "sk-test-secret-123";
@@ -161,6 +161,45 @@ describe("wire formats end to end", () => {
   });
 });
 
+describe("provider validation", () => {
+  const p = (baseUrl: string, apiKeyEnv = "OK_KEY") => ({ kind: "openai" as const, baseUrl, apiKeyEnv, models: [] });
+  test("baseUrl must be https or loopback http; apiKeyEnv must be an env name", () => {
+    for (const u of ["https://api.x.com", "http://localhost:1", "http://127.0.0.1", "http://[::1]:8080"])
+      expect(providerProblem("n", p(u))).toBeUndefined();
+    for (const u of ["http://api.x.com", "http://localhost.evil.com", "ftp://localhost", "nope", "https://u:pw@api.x.com"])
+      expect(providerProblem("n", p(u))).toBeDefined();
+    const bad = providerProblem("n", p("https://a.b", "sk-raw-value"));
+    expect(bad).toBeDefined();
+    expect(bad).not.toContain("sk-raw-value");
+  });
+
+  test("redirect is an error, not followed", async () => {
+    script = [() => new Response(null, { status: 307, headers: { location: "http://example.invalid/" } })];
+    const ev = await collect(loopAdapter.run(req("oai/gpt-x"), new AbortController().signal));
+    expect(ev.find((e) => e.type === "error")).toBeDefined();
+    expect(captured).toHaveLength(1);
+  });
+
+  test("key redacted in invalid-JSON error", async () => {
+    script = [() => new Response(`not json ${KEY}`, { status: 200 })];
+    const ev = await collect(loopAdapter.run(req("ant/claude-x"), new AbortController().signal));
+    const err = ev.find((e) => e.type === "error") as { message: string };
+    expect(err.message).toContain("invalid JSON");
+    expect(err.message).not.toContain(KEY);
+  });
+
+  test("tool output events never carry the key", async () => {
+    writeFileSync(join(work, "k.txt"), KEY);
+    script = [
+      () => Response.json({ content: [{ type: "tool_use", id: "t", name: "read_file", input: { path: "k.txt" } }] }),
+      () => Response.json({ content: [{ type: "text", text: "done" }] }),
+    ];
+    const ev = await collect(loopAdapter.run(req("ant/claude-x"), new AbortController().signal));
+    expect(JSON.stringify(ev)).not.toContain(KEY);
+    expect(JSON.stringify(captured[1]!.body)).not.toContain(KEY);
+  });
+});
+
 describe("probe", () => {
   test("lists models for providers with key set", async () => {
     const p = await loopAdapter.probe();
@@ -205,11 +244,48 @@ describe("tools", () => {
     expect(existsSync(join(work, "x"))).toBe(false);
   });
 
-  test("bash runs in cwd, hides key env, rejects bad args", async () => {
+  test("bash runs in cwd with allowlisted env only, rejects bad args", async () => {
     mkdirSync(join(work, "sub"));
-    const r = await runTool("bash", { command: 'ls; echo "k=$LOOP_TEST_KEY"' }, "edit", { cwd: work, hiddenEnv: ["LOOP_TEST_KEY"] });
+    process.env.LOOP_TEST_OTHER = "other-env";
+    const r = await runTool("bash", { command: 'ls; echo "k=$LOOP_TEST_KEY o=$LOOP_TEST_OTHER"; env | cut -d= -f1 | sort | tr "\\n" " "' }, "edit", { cwd: work });
     expect(r.output).toContain("sub");
-    expect(r.output).toContain("k=\n");
+    expect(r.output).toContain("k= o=\n");
+    const names = r.output.trim().split("\n").at(-1)!.trim().split(" ");
+    const allowed = ["PATH", "HOME", "LANG", "TERM", "TMPDIR", "USER", "SHELL", "PWD", "SHLVL", "_", "OLDPWD"];
+    expect(names.filter((n) => !allowed.includes(n))).toEqual([]);
     expect((await runTool("bash", {}, "edit", { cwd: work })).isError).toBe(true);
+  });
+
+  test("write_file/edit_file under .git/ denied", async () => {
+    mkdirSync(join(work, ".git/hooks"), { recursive: true });
+    writeFileSync(join(work, ".git/config"), "x");
+    const w = await runTool("write_file", { path: ".git/hooks/pre-commit", content: "evil" }, "edit", { cwd: work });
+    expect(w.isError).toBe(true);
+    expect(existsSync(join(work, ".git/hooks/pre-commit"))).toBe(false);
+    const e = await runTool("edit_file", { path: "./.git/config", old_string: "x", new_string: "y" }, "edit", { cwd: work });
+    expect(e.isError).toBe(true);
+    expect(readFileSync(join(work, ".git/config"), "utf8")).toBe("x");
+    expect((await runTool("write_file", { path: "a.gitignore", content: "ok" }, "edit", { cwd: work })).isError).toBe(false);
+  });
+
+  test("O_NOFOLLOW: final-component symlink is not followed even past the guard", async () => {
+    const { openSync, constants } = await import("node:fs");
+    if (!constants.O_NOFOLLOW) return; // platform without O_NOFOLLOW
+    const outside = mkdtempSync(join(tmpdir(), "loop-out-"));
+    writeFileSync(join(outside, "t"), "secret");
+    symlinkSync(join(outside, "t"), join(work, "s"));
+    expect(() => openSync(join(work, "s"), constants.O_RDONLY | constants.O_NOFOLLOW)).toThrow();
+    // in-cwd symlinks still work: the guard hands open() the realpath, not the link
+    writeFileSync(join(work, "real.txt"), "inside");
+    symlinkSync(join(work, "real.txt"), join(work, "in-link"));
+    expect((await runTool("read_file", { path: "in-link" }, "edit", { cwd: work })).output).toBe("inside");
+  });
+
+  test("known secrets redacted from tool output", async () => {
+    writeFileSync(join(work, "k.txt"), `key=${KEY}`);
+    const r = await runTool("read_file", { path: "k.txt" }, "edit", { cwd: work, secrets: [KEY] });
+    expect(r.output).toBe("key=[redacted]");
+    const b = await runTool("bash", { command: "cat k.txt" }, "edit", { cwd: work, secrets: [KEY] });
+    expect(b.output).not.toContain(KEY);
   });
 });

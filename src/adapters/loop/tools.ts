@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, constants, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { Autonomy } from "../../core/types.ts";
@@ -6,7 +6,12 @@ import type { Autonomy } from "../../core/types.ts";
 export const BASH_TIMEOUT_MS = 120_000;
 export const MAX_OUTPUT = 10_000;
 
-export type ToolContext = { cwd: string; signal?: AbortSignal; hiddenEnv?: string[] };
+/** secrets: values redacted from all tool output (before truncation, so no partial key survives a cut). */
+export type ToolContext = { cwd: string; signal?: AbortSignal; secrets?: string[] };
+
+const BASH_ENV_ALLOW = ["PATH", "HOME", "LANG", "TERM", "TMPDIR", "USER", "SHELL"];
+// 0 where unsupported (Windows): falls back to the realpath check alone.
+const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 export type ToolResult = { output: string; isError: boolean };
 export type ToolDef = { name: string; description: string; parameters: Record<string, unknown> };
 
@@ -49,6 +54,33 @@ export function guardPath(cwd: string, p: string): string {
     const parent = dirname(probe);
     if (parent === probe) throw new ToolError(`path escapes working directory: ${p}`);
     probe = parent;
+  }
+}
+
+/** Denies writes into any `.git` directory (hooks/config there would run code on the next git command). */
+function guardWrite(cwd: string, p: string): string {
+  const real = guardPath(cwd, p);
+  if (relative(realpathSync(cwd), real).split(sep).some((seg) => seg.toLowerCase() === ".git"))
+    throw new ToolError(`writes under .git/ are denied: ${p}`);
+  return real;
+}
+
+/** O_NOFOLLOW on the final component closes the swap-to-symlink window after guardPath for that component. */
+function readNoFollow(p: string): string {
+  const fd = openSync(p, constants.O_RDONLY | O_NOFOLLOW);
+  try {
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function writeNoFollow(p: string, data: string): void {
+  const fd = openSync(p, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | O_NOFOLLOW, 0o666);
+  try {
+    writeFileSync(fd, data);
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -105,12 +137,13 @@ function parse<T>(schema: z.ZodType<T>, input: unknown): T {
 }
 
 /**
- * Bash is cwd-locked only, NOT a sandbox: commands can read/write anywhere the user can.
- * Provider API key env vars (hiddenEnv) are removed from its environment.
+ * Bash is cwd-locked only, NOT a sandbox: commands run with the user's privileges and can read/write
+ * anywhere the user can. The env is an allowlist so API keys aren't inherited, but the parent's
+ * /proc/$PPID/environ is still readable by the same uid. SPEC "Autonomy" accepts this for `edit`.
  */
 async function runBash(command: string, ctx: ToolContext): Promise<ToolResult> {
-  const env = { ...process.env };
-  for (const k of ctx.hiddenEnv ?? []) delete env[k];
+  const env: Record<string, string> = {};
+  for (const k of BASH_ENV_ALLOW) if (process.env[k] !== undefined) env[k] = process.env[k]!;
   const proc = Bun.spawn(["bash", "-c", command], {
     cwd: realpathSync(ctx.cwd),
     env,
@@ -126,33 +159,38 @@ async function runBash(command: string, ctx: ToolContext): Promise<ToolResult> {
     proc.exited,
   ]);
   const killed = proc.signalCode ? `\n[killed: ${proc.signalCode}${ctx.signal?.aborted ? "" : ", timeout"}]` : "";
-  const body = truncate(`${out}${err ? `\n[stderr]\n${err}` : ""}`);
+  const body = truncate(redact(`${out}${err ? `\n[stderr]\n${err}` : ""}`, ctx.secrets ?? []));
   return { output: `exit ${code}${killed}\n${body}`, isError: code !== 0 || killed !== "" };
 }
 
 /** Executes one tool call. Never throws: failures come back as isError results for the model. */
 export async function runTool(name: string, input: unknown, autonomy: Autonomy, ctx: ToolContext): Promise<ToolResult> {
+  const r = await runToolRaw(name, input, autonomy, ctx);
+  return { ...r, output: redact(r.output, ctx.secrets ?? []) };
+}
+
+async function runToolRaw(name: string, input: unknown, autonomy: Autonomy, ctx: ToolContext): Promise<ToolResult> {
   try {
     if (!toolsFor(autonomy).some((t) => t.name === name)) throw new ToolError(`tool not available: ${name}`);
     switch (name) {
       case "read_file": {
         const a = parse(ReadArgs, input);
-        return { output: truncate(readFileSync(guardPath(ctx.cwd, a.path), "utf8"), 100_000), isError: false };
+        return { output: truncate(redact(readNoFollow(guardPath(ctx.cwd, a.path)), ctx.secrets ?? []), 100_000), isError: false };
       }
       case "write_file": {
         const a = parse(WriteArgs, input);
-        const p = guardPath(ctx.cwd, a.path);
+        const p = guardWrite(ctx.cwd, a.path);
         mkdirSync(dirname(p), { recursive: true });
-        writeFileSync(p, a.content);
+        writeNoFollow(p, a.content);
         return { output: `wrote ${a.content.length} chars to ${a.path}`, isError: false };
       }
       case "edit_file": {
         const a = parse(EditArgs, input);
-        const p = guardPath(ctx.cwd, a.path);
-        const text = readFileSync(p, "utf8");
+        const p = guardWrite(ctx.cwd, a.path);
+        const text = readNoFollow(p);
         const n = text.split(a.old_string).length - 1;
         if (n !== 1) throw new ToolError(`old_string must match exactly once, found ${n} matches`);
-        writeFileSync(p, text.replace(a.old_string, () => a.new_string));
+        writeNoFollow(p, text.replace(a.old_string, () => a.new_string));
         return { output: `edited ${a.path}`, isError: false };
       }
       case "bash":
@@ -162,4 +200,10 @@ export async function runTool(name: string, input: unknown, autonomy: Autonomy, 
   } catch (e) {
     return { output: e instanceof Error ? e.message : String(e), isError: true };
   }
+}
+
+/** Replaces every occurrence of each secret (empty strings ignored) with [redacted]. */
+export function redact(s: string, secrets: string[]): string {
+  for (const k of secrets) if (k) s = s.split(k).join("[redacted]");
+  return s;
 }
