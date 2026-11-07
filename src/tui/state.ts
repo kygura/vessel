@@ -20,11 +20,13 @@ export interface TuiRunState {
   events: RouterEvent[];
   verify?: { command: string; ok: boolean; exitCode: number | null; output: string };
   outcome?: Outcome;
+  /** User-facing notes from the run (edit-mode sandbox warning, untrusted .router.json verify), in order, deduped. */
+  notices: string[];
   /** Set when the run ended `failed`, or by the hook for non-run errors (e.g. rate). */
   error?: string;
 }
 
-export const initialRun: TuiRunState = { phase: "idle", candidates: [], fallbacks: [], events: [] };
+export const initialRun: TuiRunState = { phase: "idle", candidates: [], fallbacks: [], events: [], notices: [] };
 
 export const isBusy = (s: TuiRunState) => s.phase !== "idle" && s.phase !== "done" && s.phase !== "failed";
 
@@ -53,5 +55,7 @@ export function reduce(s: TuiRunState, u: RunUpdate): TuiRunState {
       return { ...s, verify: { command: u.command, ok: u.ok, exitCode: u.exitCode, output: u.output } };
     case "outcome":
       return { ...s, outcome: u.outcome };
+    case "notice":
+      return s.notices.includes(u.message) ? s : { ...s, notices: [...s.notices, u.message] };
   }
 }

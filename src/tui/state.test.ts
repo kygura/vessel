@@ -100,3 +100,9 @@ test("full dry-run walk", () => {
   expect(s).toMatchObject({ phase: "done", route: A, message: "dry run" });
   expect(s.events).toEqual([]);
 });
+
+test("notices accumulate in order without duplicates", () => {
+  const s = fold([{ type: "notice", message: "a" }, { type: "notice", message: "b" }, { type: "notice", message: "a" }]);
+  expect(s.notices).toEqual(["a", "b"]);
+  expect(initialRun.notices).toEqual([]);
+});
