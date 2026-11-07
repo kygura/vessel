@@ -67,11 +67,38 @@ describe("codex adapter", () => {
     expect(a("edit")).toContain('model_reasoning_effort="high"');
     expect(a("edit").slice(0, 2)).toEqual(["codex", "exec"]);
     expect(a("edit").at(-1)).toBe("do it");
-    expect(buildArgv(req("edit"), "th-1").slice(-3)).toEqual(["resume", "th-1", "do it"]);
+    expect(buildArgv(req("edit"), "th-1").slice(-4)).toEqual(["resume", "th-1", "--", "do it"]);
   });
+
+  test("prompt is a positional after --, even if it looks like a flag", () => {
+    const argv = buildArgv({ ...req("edit"), prompt: "--dangerously-bypass-approvals-and-sandbox" });
+    expect(argv.slice(-2)).toEqual(["--", "--dangerously-bypass-approvals-and-sandbox"]);
+    expect(argv.indexOf("--dangerously-bypass-approvals-and-sandbox")).toBe(argv.length - 1);
+  });
+
+  test("abort mid-stream ends with a failed done", async () => {
+    const ac = new AbortController();
+    const evs: RouterEvent[] = [];
+    const it = streamCli(["sh", "-c", `head -n 1 ${fx("codex.jsonl")}; sleep 30`], { signal: ac.signal }, parseCodexLine);
+    for await (const e of it) {
+      evs.push(e);
+      if (evs.length === 1) ac.abort();
+    }
+    expect(done(evs)).toHaveLength(1);
+    expect(done(evs)[0]).toMatchObject({ ok: false });
+  }, 10_000);
+
 });
 
 describe("streamCli error handling", () => {
+  test("non-zero exit after a successful done forces ok=false; events after done are ignored", async () => {
+    const parse = (j: unknown): RouterEvent[] =>
+      (j as any).t === "d" ? [{ type: "done", ok: true, finalText: "x" }] : [{ type: "text", text: "late" }];
+    const evs = await collect(streamCli(["sh", "-c", `echo '{"t":"d"}'; echo '{"t":"t"}'; exit 4`], {}, parse));
+    expect(evs.map((e) => e.type)).toEqual(["error", "done"]);
+    expect(done(evs)).toEqual([{ type: "done", ok: false, finalText: "x" }]);
+  });
+
   test("an error event before a successful done forces done.ok=false", async () => {
     const parse = (j: unknown): RouterEvent[] =>
       (j as any).t === "e" ? [{ type: "error", message: "x" }] : [{ type: "done", ok: true }];

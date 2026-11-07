@@ -20,8 +20,9 @@ export function lineEvents(line: JsonlLine, parse: ParseLine): RouterEvent[] {
 
 /**
  * Spawns the CLI and streams normalized events. Dedupes repeated `session` ids, fills a missing
- * `finalText` from the last text event, and guarantees exactly one trailing `done` (ok=false if any `error` event was seen)
- * (synthesized from the exit code when the CLI never sent one).
+ * `finalText` from the last text event, and guarantees exactly one trailing `done` 
+ * (synthesized from the exit code when the CLI never sent one). `done` is held until the process exits and is
+ * ok=false if any `error` event was seen or the exit code is non-zero.
  */
 export async function* streamCli(
   argv: string[],
@@ -38,11 +39,11 @@ export async function* streamCli(
   }
   let lastText: string | undefined;
   let session: string | undefined;
-  let done = false;
+  let pendingDone: Extract<RouterEvent, { type: "done" }> | undefined;
   let failed = false;
   for await (const line of proc.lines) {
     for (const ev of lineEvents(line, parse)) {
-      if (done) continue;
+      if (pendingDone) continue; // events after done are ignored
       if (ev.type === "session") {
         if (ev.id === session) continue;
         session = ev.id;
@@ -51,19 +52,20 @@ export async function* streamCli(
       } else if (ev.type === "error") {
         failed = true;
       } else if (ev.type === "done") {
-        done = true;
-        yield { ...ev, ok: ev.ok && !failed, finalText: ev.finalText ?? lastText };
+        pendingDone = { ...ev, finalText: ev.finalText ?? lastText }; // held until the process has exited
         continue;
       }
       yield ev;
     }
   }
   const exit = await proc.exit;
-  if (!done) {
-    const ok = exit.exitCode === 0 && !failed;
-    if (exit.exitCode !== 0) yield { type: "error", message: `exit ${exit.exitCode ?? "signal"}: ${exit.stderrTail.trim()}` };
-    yield { type: "done", ok, finalText: lastText };
+  const badExit = exit.exitCode !== 0;
+  if (badExit) {
+    failed = true;
+    yield { type: "error", message: `exit ${exit.exitCode ?? "signal"}: ${exit.stderrTail.trim()}` };
   }
+  const base = pendingDone ?? { type: "done" as const, ok: true, finalText: lastText };
+  yield { ...base, ok: base.ok && !failed };
 }
 
 /** `which` + auth check + optional model listing. `loggedIn` decides from a successful auth command. */

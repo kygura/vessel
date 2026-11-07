@@ -57,7 +57,7 @@ export function buildArgv(req: RunRequest, resumeId?: string): string[] {
   else argv.push("--dangerously-bypass-approvals-and-sandbox");
   // Flags go before `resume`: only some of them are accepted by the subcommand itself.
   if (resumeId) argv.push("resume", resumeId);
-  argv.push(req.prompt);
+  argv.push("--", req.prompt);
   return argv;
 }
 

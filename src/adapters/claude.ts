@@ -1,16 +1,15 @@
 import type { Adapter, RouterEvent, RunRequest } from "../core/types.ts";
 import { clip, obj, probeCli, streamCli } from "./common.ts";
 
+const READ_DENY = "Edit Write Bash NotebookEdit";
 const EDIT_TOOLS = "Read Edit Write Bash Glob Grep";
 
 /** Claude Code `stream-json` event -> normalized events. Unknown types yield []. */
 export function parseClaudeLine(json: unknown): RouterEvent[] {
   const e = obj(json);
-  const out: RouterEvent[] = [];
+  // session_id rides on every event; streamCli dedupes.
+  const out: RouterEvent[] = typeof e.session_id === "string" ? [{ type: "session", id: e.session_id }] : [];
   switch (e.type) {
-    case "system":
-      if (e.subtype === "init" && typeof e.session_id === "string") out.push({ type: "session", id: e.session_id });
-      break;
     case "assistant":
       for (const b of Array.isArray(e.message?.content) ? e.message.content : []) {
         if (b?.type === "text" && typeof b.text === "string") out.push({ type: "text", text: b.text });
@@ -42,11 +41,12 @@ export function parseClaudeLine(json: unknown): RouterEvent[] {
 }
 
 export function buildArgv(req: RunRequest, resumeId?: string): string[] {
-  const argv = ["claude", "-p", req.prompt, "--output-format", "stream-json", "--verbose", "--model", req.model, "--effort", req.effort];
-  if (req.autonomy === "read") argv.push("--permission-mode", "plan");
+  const argv = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--model", req.model, "--effort", req.effort];
+  if (req.autonomy === "read") argv.push("--permission-mode", "plan", "--disallowedTools", READ_DENY);
   else if (req.autonomy === "edit") argv.push("--permission-mode", "acceptEdits", "--allowedTools", EDIT_TOOLS);
   else argv.push("--dangerously-skip-permissions");
   if (resumeId) argv.push("-r", resumeId);
+  argv.push("--", req.prompt); // after `--` the prompt can never parse as a flag
   return argv;
 }
 

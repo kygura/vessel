@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runCapture, which } from "../core/proc.ts";
 import type { Adapter, ModelRef, ProbeResult, RouterEvent, RunRequest } from "../core/types.ts";
 import { clip, obj, streamCli } from "./common.ts";
@@ -82,8 +85,12 @@ export function createDroidAdapter(bin = "droid", env: Record<string, string | u
     capabilities: { resume: true, cost: false, listModels: true },
     async probe(): Promise<ProbeResult> {
       if (!which(bin)) return { available: false, reason: "droid not found on PATH", models: [] };
-      // An invalid model makes droid print its built-in model list and exit before auth.
-      const r = await runCapture([bin, "exec", "-m", "__router_probe__", "x"], 5000);
+      // `exec --help` lacks the model list, but an invalid model makes droid print it and exit before auth.
+      // Worst case (droid runs anyway) it runs read-only (no --auto) in a fresh empty dir, so nothing real can be touched.
+      const dir = await mkdtemp(join(tmpdir(), "router-droid-probe-"));
+      const r = await runCapture([bin, "exec", "--cwd", dir, "-m", "__router_probe__", "x"], 5000).finally(() =>
+        rm(dir, { recursive: true, force: true }),
+      );
       const models = parseDroidModels(`${r.stdout}\n${r.stderr}`);
       // Auth state is not queryable; FACTORY_API_KEY is the only signal we have.
       if (!env.FACTORY_API_KEY) return { available: false, reason: "not logged in (FACTORY_API_KEY unset)", models };

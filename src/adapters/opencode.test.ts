@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { RouterEvent, RunRequest } from "../core/types.ts";
 import { RouterEvent as RouterEventSchema } from "../core/types.ts";
 import { lineEvents, streamCli } from "./common.ts";
-import { buildArgv, parseOpencodeLine } from "./opencode.ts";
+import { buildArgv, buildEnv, parseOpencodeLine } from "./opencode.ts";
 
 const fx = (n: string) => new URL(`./fixtures/${n}`, import.meta.url).pathname;
 const collect = async (it: AsyncIterable<RouterEvent>) => {
@@ -56,6 +56,36 @@ describe("opencode adapter", () => {
     expect(a("full")).toContain("--dangerously-skip-permissions");
     expect(a("full")).not.toContain("--auto");
     expect(a("edit")).toEqual(expect.arrayContaining(["--format", "json", "-m", "anthropic/claude-sonnet-5#high"]));
-    expect(buildArgv(req("edit"), "ses_9").slice(-2)).toEqual(["-s", "ses_9"]);
+    expect(buildArgv(req("edit"), "ses_9")).toEqual(expect.arrayContaining(["-s", "ses_9"]));
   });
+
+  test("prompt is a positional after --, even if it looks like a flag", () => {
+    const argv = buildArgv({ ...req("edit"), prompt: "--dangerously-skip-permissions" });
+    expect(argv.slice(-2)).toEqual(["--", "--dangerously-skip-permissions"]);
+    expect(argv.indexOf("--dangerously-skip-permissions")).toBe(argv.length - 1);
+  });
+
+  test("read autonomy injects deny config; edit does not", () => {
+    expect(JSON.parse(buildEnv(req("read")).OPENCODE_CONFIG_CONTENT!)).toEqual({ permission: { edit: "deny", bash: "deny" } });
+    expect(buildEnv(req("read")).PWD).toBe("/w");
+    expect(buildEnv(req("edit")).OPENCODE_CONFIG_CONTENT).toBeUndefined();
+  });
+
+  test("error line with exit 0 still yields done.ok=false", async () => {
+    const evs = await replay("opencode-error.jsonl", 0);
+    expect(done(evs)[0]).toMatchObject({ ok: false });
+  });
+
+  test("abort mid-stream ends with a failed done", async () => {
+    const ac = new AbortController();
+    const evs: RouterEvent[] = [];
+    const it = streamCli(["sh", "-c", `head -n 1 ${fx("opencode.jsonl")}; sleep 30`], { signal: ac.signal }, parseOpencodeLine);
+    for await (const e of it) {
+      evs.push(e);
+      if (evs.length === 1) ac.abort();
+    }
+    expect(done(evs)).toHaveLength(1);
+    expect(done(evs)[0]).toMatchObject({ ok: false });
+  }, 10_000);
+
 });

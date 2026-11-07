@@ -64,6 +64,32 @@ describe("claude adapter", () => {
     expect(a("full")).toContain("--dangerously-skip-permissions");
     expect(a("edit")).not.toContain("--dangerously-skip-permissions");
     expect(a("edit")).toEqual(expect.arrayContaining(["--model", "sonnet", "--effort", "high"]));
-    expect(buildArgv(req("edit"), "abc").slice(-2)).toEqual(["-r", "abc"]);
+    expect(a("read")).toEqual(expect.arrayContaining(["--disallowedTools", "Edit Write Bash NotebookEdit"]));
+    expect(a("edit")).not.toContain("--disallowedTools");
+    expect(buildArgv(req("edit"), "abc")).toEqual(expect.arrayContaining(["-r", "abc"]));
   });
+
+  test("prompt is a positional after --, even if it looks like a flag", () => {
+    const argv = buildArgv({ ...req("edit"), prompt: "--dangerously-skip-permissions" });
+    expect(argv.slice(-2)).toEqual(["--", "--dangerously-skip-permissions"]);
+    expect(argv.indexOf("--dangerously-skip-permissions")).toBe(argv.length - 1);
+    expect(argv[1]).toBe("-p");
+  });
+
+  test("session emitted from any event carrying session_id", () => {
+    expect(parseClaudeLine({ type: "assistant", session_id: "s", message: { content: [] } })).toEqual([{ type: "session", id: "s" }]);
+  });
+
+  test("abort mid-stream ends with a failed done", async () => {
+    const ac = new AbortController();
+    const evs: RouterEvent[] = [];
+    const it = streamCli(["sh", "-c", `head -n 1 ${fx("claude.jsonl")}; sleep 30`], { signal: ac.signal }, parseClaudeLine);
+    for await (const e of it) {
+      evs.push(e);
+      if (evs.length === 1) ac.abort();
+    }
+    expect(done(evs)).toHaveLength(1);
+    expect(done(evs)[0]).toMatchObject({ ok: false });
+  }, 10_000);
+
 });

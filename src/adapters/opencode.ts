@@ -42,16 +42,27 @@ export function parseOpencodeLine(json: unknown): RouterEvent[] {
 
 /** req.model is `provider/model`; effort becomes the `#variant` suffix. */
 export function buildArgv(req: RunRequest, resumeId?: string): string[] {
-  const argv = ["opencode", "run", req.prompt, "--format", "json", "-m", `${req.model}#${req.effort}`];
+  const argv = ["opencode", "run", "--format", "json", "-m", `${req.model}#${req.effort}`];
   if (req.autonomy === "edit") argv.push("--auto");
   else if (req.autonomy === "full") argv.push("--dangerously-skip-permissions");
-  // read: no flag; permission requests are auto-rejected.
+  // read: no flag; writes are denied by buildEnv's inline config.
   if (resumeId) argv.push("-s", resumeId);
+  argv.push("--", req.prompt);
   return argv;
 }
 
+/**
+ * PWD follows cwd. `read` injects an explicit deny for edit (covers write/patch) and bash via inline config;
+ * shape from opencode packages/web/src/content/docs/permissions.mdx, loaded by packages/core/src/config.ts (OPENCODE_CONFIG_CONTENT).
+ */
+export function buildEnv(req: RunRequest): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...process.env, PWD: req.cwd };
+  if (req.autonomy === "read") env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ permission: { edit: "deny", bash: "deny" } });
+  return env;
+}
+
 const stream = (req: RunRequest, signal: AbortSignal, resumeId?: string) =>
-  streamCli(buildArgv(req, resumeId), { cwd: req.cwd, env: { ...process.env, PWD: req.cwd }, signal }, parseOpencodeLine);
+  streamCli(buildArgv(req, resumeId), { cwd: req.cwd, env: buildEnv(req), signal }, parseOpencodeLine);
 
 async function listModels(): Promise<ModelRef[]> {
   const r = await runCapture(["opencode", "models"], 5000);
