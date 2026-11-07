@@ -89,6 +89,7 @@ export const SessionRecord = z.object({
   prompt: z.string(),
   route: Route,
   tier: Tier,
+  autonomy: Autonomy.optional(),
   nativeSessionId: z.string().optional(),
   result: OutcomeResult.optional(),
   costUsd: z.number().optional(),

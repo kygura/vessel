@@ -58,15 +58,16 @@ export const appendOutcome = (o: Outcome) => append(routerPaths().outcomes, o);
 
 function load(id: string, outcomes: Outcome[]): SessionRecord | undefined {
   const lines = readJsonl(routerPaths().sessionLog(id), Line);
-  const record = lines.findLast((l) => l.kind === "record")?.record;
-  if (!record) return;
-  const native = lines.findLast((l) => l.kind === "event" && l.event.type === "session");
+  const at = lines.findLastIndex((l) => l.kind === "record");
+  if (at < 0) return;
+  // Native id = last `session` event after the final route record, so a failed route's id (or another adapter's) is never reused.
+  const native = lines.slice(at + 1).findLast((l) => l.kind === "event" && l.event.type === "session");
   const outcome = outcomes.find((o) => o.sessionId === id);
   return {
-    ...record,
-    nativeSessionId: native?.kind === "event" && native.event.type === "session" ? native.event.id : record.nativeSessionId,
-    result: outcome?.result ?? record.result,
-    costUsd: outcome?.costUsd ?? record.costUsd,
+    ...(lines[at] as Extract<Line, { kind: "record" }>).record,
+    nativeSessionId: native?.kind === "event" && native.event.type === "session" ? native.event.id : undefined,
+    result: outcome?.result,
+    costUsd: outcome?.costUsd,
   };
 }
 

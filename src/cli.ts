@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { ADAPTERS } from "./adapters/index.ts";
 import { PI_SANDBOX_NOTE } from "./adapters/pi.ts";
 import { loadEvidence } from "./core/config.ts";
 import { Autonomy, Effort, Tier, type RouterEvent, type SessionRecord } from "./core/types.ts";
-import { type RunUpdate, rateSession, resumeTask, runTask } from "./run.ts";
+import { type RunUpdate, editNotice, rateSession, resumeTask, runTask, trustProject } from "./run.ts";
 import { buildRoster } from "./routing/roster.ts";
 import { getSession, listSessions, readEvents } from "./sessions.ts";
 
@@ -18,7 +19,9 @@ const HELP = `router - route coding tasks to the best reachable agent CLI + mode
   router roster                  reachable routes and why others are unavailable
   router sessions                list sessions
   router logs <id>               print a session's event log
-  router resume <id> "<prompt>"  continue a session on the same route
+  router resume <id> "<prompt>" [--verify CMD] [--autonomy read|edit|full]
+                                 continue a session on the same route
+  router trust [--cwd DIR]       trust the verify command in DIR/.router.json
   router rate <id> pass|fail     label a session's outcome`;
 
 const oneLine = (s: string, n: number) => {
@@ -77,21 +80,27 @@ async function print(updates: AsyncIterable<RunUpdate>): Promise<number> {
       case "phase":
         if (u.phase === "failed") { console.error(`failed${u.message ? `: ${u.message}` : ""}`); code = 1; }
         break;
+      case "notice": console.log(`note: ${u.message}`); break;
       case "roster": break;
     }
   }
   return code;
 }
 
+const RUN_OPTIONS = {
+  "dry-run": { type: "boolean" }, verify: { type: "string" }, tier: { type: "string" }, adapter: { type: "string" },
+  model: { type: "string" }, effort: { type: "string" }, autonomy: { type: "string" }, cwd: { type: "string" },
+} as const;
+
+function dirOrFail(cwd: string | undefined): string | undefined {
+  if (cwd === undefined) return undefined;
+  const abs = resolve(cwd);
+  if (!existsSync(abs) || !statSync(abs).isDirectory()) fail(`--cwd is not a directory: ${cwd}`);
+  return abs;
+}
+
 function parseRun(args: string[]) {
-  const { values, positionals } = parseArgs({
-    args,
-    allowPositionals: true,
-    options: {
-      "dry-run": { type: "boolean" }, verify: { type: "string" }, tier: { type: "string" }, adapter: { type: "string" },
-      model: { type: "string" }, effort: { type: "string" }, autonomy: { type: "string" }, cwd: { type: "string" },
-    },
-  });
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, options: RUN_OPTIONS });
   const pick = <T,>(schema: { safeParse(v: unknown): { success: true; data: T } | { success: false } }, v: string | undefined, flag: string) => {
     if (v === undefined) return undefined;
     const r = schema.safeParse(v);
@@ -100,7 +109,7 @@ function parseRun(args: string[]) {
   return {
     positionals,
     opts: {
-      dryRun: values["dry-run"], verify: values.verify, cwd: values.cwd, model: values.model,
+      dryRun: values["dry-run"], verify: values.verify, cwd: dirOrFail(values.cwd), model: values.model,
       tier: pick(Tier, values.tier, "tier"), effort: pick(Effort, values.effort, "effort"),
       autonomy: pick(Autonomy, values.autonomy, "autonomy"),
       adapter: pick(ADAPTER_ID, values.adapter, "adapter"),
@@ -119,6 +128,7 @@ async function cmdRoster() {
   const roster = await buildRoster(ADAPTERS, { evidence: loadEvidence(), useCache: false });
   console.log(table([["adapter", "model"], ...roster.routes.map((r) => [r.adapter, r.model])]));
   if (roster.unavailable.length) console.log(`\nunavailable:\n${table(roster.unavailable.map((u) => [u.adapter, u.reason]))}`);
+  for (const a of new Set(roster.routes.map((r) => r.adapter))) if (a !== "codex") console.log(`\nnote: ${editNotice(a)}`);
   if (roster.routes.some((r) => r.adapter === "pi")) console.log(`\nnote: ${PI_SANDBOX_NOTE}`);
 }
 
@@ -163,9 +173,17 @@ try {
       break;
     }
     case "resume": {
-      const [id, ...p] = rest;
-      if (!id || !p.length) fail('usage: router resume <id> "<prompt>"');
-      process.exitCode = await print(resumeTask(id!, p.join(" "), { signal: sigint() }));
+      const { positionals: [id, ...p], values } = parseArgs({ args: rest, allowPositionals: true, options: { verify: { type: "string" }, autonomy: { type: "string" } } });
+      if (!id || !p.length) fail('usage: router resume <id> "<prompt>" [--verify CMD] [--autonomy read|edit|full]');
+      const autonomy = values.autonomy === undefined ? undefined : (Autonomy.safeParse(values.autonomy).data ?? fail(`invalid --autonomy: ${values.autonomy}`));
+      process.exitCode = await print(resumeTask(id!, p.join(" "), { verify: values.verify, autonomy, signal: sigint() }));
+      break;
+    }
+    case "trust": {
+      const cwd = dirOrFail(parseArgs({ args: rest, options: { cwd: { type: "string" } } }).values.cwd) ?? process.cwd();
+      const r = trustProject(cwd);
+      if (!r) fail(`no verify command in ${cwd}/.router.json`);
+      console.log(`trusted verify command for ${cwd}:\n  ${r!.command}`);
       break;
     }
     case "rate": {

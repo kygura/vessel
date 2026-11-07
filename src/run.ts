@@ -1,12 +1,13 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import { ADAPTERS } from "./adapters/index.ts";
 import { complete } from "./adapters/loop/index.ts";
 import { loadEvidence } from "./core/config.ts";
+import { routerPaths } from "./core/paths.ts";
 import { runCapture } from "./core/proc.ts";
 import {
-  type Adapter, type Autonomy, type Effort, type Outcome, type OutcomeResult, type RouterEvent, type Route, type Tier,
+  type Adapter, type Autonomy, type Effort, type Outcome, type OutcomeResult, type RouterEvent, type Route, type SessionRecord, type Tier,
   Tier as TierSchema,
 } from "./core/types.ts";
 import { type Classification, type LlmClassifier, classify } from "./routing/classify.ts";
@@ -31,7 +32,8 @@ export type RunUpdate =
   | { type: "fallback"; from: Route; to: Route; reason: string }
   | { type: "event"; event: RouterEvent }
   | { type: "verify"; command: string; ok: boolean; exitCode: number | null; output: string }
-  | { type: "outcome"; outcome: Outcome };
+  | { type: "outcome"; outcome: Outcome }
+  | { type: "notice"; message: string };
 
 export interface RunOptions {
   cwd?: string;
@@ -51,6 +53,7 @@ export interface RunOptions {
 
 const CLASSIFY_TIMEOUT_MS = 15_000;
 const VERIFY_TIMEOUT_MS = 600_000;
+const MAX_FALLBACKS = 3;
 const ClassifyReply = z.object({ tier: TierSchema, reasons: z.array(z.string()) });
 
 function timeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -96,6 +99,36 @@ function projectVerify(cwd: string): string | undefined {
   }
 }
 
+const hash = (cmd: string) => new Bun.CryptoHasher("sha256").update(cmd).digest("hex");
+const trustFile = () => join(routerPaths().home, "trusted.json");
+function trustedHashes(): string[] {
+  try {
+    return z.array(z.string()).parse(JSON.parse(readFileSync(trustFile(), "utf8")));
+  } catch {
+    return [];
+  }
+}
+
+/** Adds the hash of the repo's `.router.json` verify command to trusted.json. Undefined when the repo has none. */
+export function trustProject(cwd: string): { command: string } | undefined {
+  const command = projectVerify(resolve(cwd));
+  if (!command) return;
+  const all = trustedHashes();
+  if (!all.includes(hash(command))) writeFileSync(trustFile(), JSON.stringify([...all, hash(command)], null, 2));
+  return { command };
+}
+
+/** `--verify` is always honored; a `.router.json` verify runs only when its hash is trusted. */
+function resolveVerify(explicit: string | undefined, cwd: string): { command?: string; notice?: string } {
+  if (explicit) return { command: explicit };
+  const command = projectVerify(cwd);
+  if (!command) return {};
+  if (trustedHashes().includes(hash(command))) return { command };
+  return { notice: `.router.json verify \`${command}\` is not trusted, so it was not run (outcome stays unknown). To allow it: router trust --cwd ${cwd}` };
+}
+
+export const editNotice = (adapter: string) => `${adapter} edit mode runs shell commands with your user privileges (no OS sandbox)`;
+
 async function runVerify(cmd: string, cwd: string, signal?: AbortSignal) {
   try {
     const proc = Bun.spawn(["sh", "-c", cmd], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", signal, timeout: VERIFY_TIMEOUT_MS });
@@ -110,18 +143,20 @@ async function runVerify(cmd: string, cwd: string, signal?: AbortSignal) {
 interface Try { route: Route; resumeId?: string }
 
 async function* execute(
-  s: { id: string; cwd: string; tier: Tier },
+  s: SessionRecord,
   tries: Try[],
-  o: { prompt: string; verify?: string; autonomy: Autonomy; signal?: AbortSignal; adapters: Adapter[] },
+  o: { prompt: string; verify?: string; autonomy: Autonomy; signal?: AbortSignal; adapters: Adapter[]; prev?: Outcome },
 ): AsyncGenerator<RunUpdate> {
   const signal = o.signal ?? new AbortController().signal;
-  const verifyCmd = o.verify ?? projectVerify(s.cwd);
+  const { command: verifyCmd, notice } = resolveVerify(o.verify, s.cwd);
   yield { type: "phase", phase: "running" };
+  if (notice) yield { type: "notice", message: notice };
 
   let ran: { route: Route; costUsd?: number; latencyMs: number } | undefined;
   let lastReason = "no route";
   for (const [i, t] of tries.entries()) {
     yield { type: "route", route: t.route, index: i };
+    if (o.autonomy === "edit" && t.route.adapter !== "codex") yield { type: "notice", message: editNotice(t.route.adapter) };
     const adapter = o.adapters.find((a) => a.id === t.route.adapter);
     const req = { prompt: o.prompt, cwd: s.cwd, model: t.route.model, effort: t.route.effort, autonomy: o.autonomy };
     const t0 = Date.now();
@@ -155,7 +190,7 @@ async function* execute(
     if (next) {
       appendEvent(s.id, { type: "error", message: `${t.route.adapter}/${t.route.model} failed to start (${lastReason}); falling back to ${next.route.adapter}/${next.route.model}` });
       yield { type: "fallback", from: t.route, to: next.route, reason: lastReason };
-      saveSession({ ...getSession(s.id)!, route: next.route });
+      saveSession({ ...s, route: next.route });
     }
   }
   if (!ran) {
@@ -164,14 +199,20 @@ async function* execute(
   }
 
   // Agent exit status alone never counts as a pass: only the verify command (or `router rate`) labels it.
-  let result: OutcomeResult = "unknown";
+  // On resume, a previously rated/verified result stands unless verify re-ran; cost and latency accumulate.
+  let result: OutcomeResult = o.prev?.result ?? "unknown";
   if (verifyCmd) {
     yield { type: "phase", phase: "verifying" };
     const v = await runVerify(verifyCmd, s.cwd, signal);
+    if (signal.aborted) {
+      yield { type: "phase", phase: "failed", message: "aborted" };
+      return;
+    }
     yield { type: "verify", command: verifyCmd, ...v };
     result = v.ok ? "pass" : "fail";
   }
-  const outcome: Outcome = { sessionId: s.id, ts: new Date().toISOString(), route: ran.route, tier: s.tier, result, costUsd: ran.costUsd, latencyMs: ran.latencyMs };
+  const costUsd = o.prev?.costUsd === undefined ? ran.costUsd : o.prev.costUsd + (ran.costUsd ?? 0);
+  const outcome: Outcome = { sessionId: s.id, ts: new Date().toISOString(), route: ran.route, tier: s.tier, result, costUsd, latencyMs: (o.prev?.latencyMs ?? 0) + ran.latencyMs };
   appendOutcome(outcome);
   yield { type: "outcome", outcome };
   yield { type: "phase", phase: result === "fail" ? "failed" : "done" };
@@ -203,6 +244,7 @@ async function* plan(prompt: string, opts: RunOptions): AsyncGenerator<RunUpdate
     evidence,
     outcomes: readOutcomes(),
     rng: opts.rng,
+    explore: !opts.dryRun,
     pins: { adapter: opts.adapter, model: opts.model, effort: opts.effort },
   });
   if (!candidates.length) {
@@ -216,9 +258,9 @@ async function* plan(prompt: string, opts: RunOptions): AsyncGenerator<RunUpdate
     return;
   }
 
-  const session = createSession({ cwd, prompt, route: candidates[0]!.route, tier: classification.tier });
+  const session = createSession({ cwd, prompt, route: candidates[0]!.route, tier: classification.tier, autonomy });
   yield { type: "started", sessionId: session.id };
-  yield* execute(session, candidates.map((c) => ({ route: c.route })), { prompt, verify: opts.verify, autonomy, signal: opts.signal, adapters });
+  yield* execute(session, candidates.slice(0, MAX_FALLBACKS + 1).map((c) => ({ route: c.route })), { prompt, verify: opts.verify, autonomy, signal: opts.signal, adapters });
 }
 
 /** Never throws: unexpected errors surface as a `failed` phase so a TUI can keep rendering. */
@@ -242,8 +284,10 @@ async function* resume(id: string, prompt: string, opts: RunOptions): AsyncGener
   if (!adapter?.capabilities.resume || !adapter.resume) throw new Error(`resume is unsupported for adapter ${s.route.adapter}`);
   if (!s.nativeSessionId) throw new Error(`session ${s.id} has no native session id to resume`);
   yield { type: "started", sessionId: s.id };
+  // Reuse the original autonomy, but never silently escalate to full: that needs the explicit flag every run.
+  const autonomy = opts.autonomy ?? (s.autonomy === "full" ? "edit" : s.autonomy) ?? "edit";
   yield* execute(s, [{ route: s.route, resumeId: s.nativeSessionId }], {
-    prompt, verify: opts.verify, autonomy: opts.autonomy ?? "edit", signal: opts.signal, adapters,
+    prompt, verify: opts.verify, autonomy, signal: opts.signal, adapters, prev: readOutcomes().find((x) => x.sessionId === s.id),
   });
 }
 
@@ -257,10 +301,8 @@ export function rateSession(id: string, result: "pass" | "fail"): Outcome {
   const s = getSession(id);
   if (!s) throw new Error(`no such session: ${id}`);
   const prev = readOutcomes().find((o) => o.sessionId === s.id);
-  const outcome: Outcome = {
-    sessionId: s.id, ts: new Date().toISOString(), route: prev?.route ?? s.route, tier: s.tier, result,
-    costUsd: prev?.costUsd, latencyMs: prev?.latencyMs ?? 0,
-  };
+  if (!prev) throw new Error(`session ${s.id} has no outcome yet (it never finished); nothing to rate`);
+  const outcome: Outcome = { ...prev, ts: new Date().toISOString(), result };
   appendOutcome(outcome);
   return outcome;
 }

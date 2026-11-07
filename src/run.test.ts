@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Adapter, RouterEvent } from "./core/types.ts";
-import { type RunOptions, type RunUpdate, rateSession, resumeTask, runTask } from "./run.ts";
+import { type RunOptions, type RunUpdate, rateSession, resumeTask, runTask, trustProject } from "./run.ts";
 import { getSession, listSessions, readEvents, readOutcomes } from "./sessions.ts";
 
 let home: string;
@@ -23,9 +23,9 @@ type Script = (n: number) => RouterEvent[] | Error;
 const OK: RouterEvent[] = [{ type: "session", id: "native-1" }, { type: "text", text: "working" }, { type: "usage", costUsd: 0.5 }, { type: "done", ok: true, finalText: "ok" }];
 const BOOT_FAIL: RouterEvent[] = [{ type: "error", message: "not logged in" }, { type: "done", ok: false }];
 
-function fake(id: Adapter["id"], script: Script, resume = false): Adapter & { runs: number; resumed: string[] } {
+function fake(id: Adapter["id"], script: Script, resume = false): Adapter & { runs: number; resumed: string[]; autonomy: string[] } {
   const a = {
-    id, runs: 0, resumed: [] as string[],
+    id, runs: 0, resumed: [] as string[], autonomy: [] as string[],
     capabilities: { resume, cost: true, listModels: true },
     probe: async () => ({ available: true, models: [{ adapter: id, model: `${id}-m` }] }),
     async *run() {
@@ -33,7 +33,7 @@ function fake(id: Adapter["id"], script: Script, resume = false): Adapter & { ru
       if (r instanceof Error) throw r;
       yield* r;
     },
-    async *resume(native: string) { a.resumed.push(native); yield* OK; },
+    async *resume(native: string, req: { autonomy: string }) { a.resumed.push(native); a.autonomy.push(req.autonomy); yield* OK; },
   };
   return a as never;
 }
@@ -99,10 +99,62 @@ test("verify command decides pass/fail; agent success alone is unknown", async (
   expect(none.phases).not.toContain("verifying");
 });
 
-test(".router.json verify is used when --verify is absent", async () => {
+test(".router.json verify runs only once trusted; untrusted stays unknown with a notice", async () => {
   writeFileSync(join(cwd, ".router.json"), JSON.stringify({ verify: "false" }));
-  const r = await collect(runTask("t", base([fake("claude", () => OK)])));
-  expect(r.outcome?.result).toBe("fail");
+  const untrusted = await collect(runTask("t", base([fake("claude", () => OK)])));
+  expect(untrusted.outcome?.result).toBe("unknown");
+  expect(untrusted.phases).not.toContain("verifying");
+  expect(untrusted.all.some((u) => u.type === "notice" && u.message.includes("router trust"))).toBe(true);
+
+  expect(trustProject(cwd)).toEqual({ command: "false" });
+  const trusted = await collect(runTask("t", base([fake("claude", () => OK)])));
+  expect(trusted.outcome?.result).toBe("fail");
+
+  // editing the command invalidates trust; explicit --verify is always honored
+  writeFileSync(join(cwd, ".router.json"), JSON.stringify({ verify: "true" }));
+  expect((await collect(runTask("t", base([fake("claude", () => OK)])))).outcome?.result).toBe("unknown");
+  expect((await collect(runTask("t", base([fake("claude", () => OK)], { verify: "true" })))).outcome?.result).toBe("pass");
+});
+
+test("abort during the run or during verify fails with 'aborted' and records no outcome", async () => {
+  for (const [verify, trigger] of [[undefined, "text"], ["sleep 30", "verifying"]] as const) {
+    const ac = new AbortController();
+    const all: RunUpdate[] = [];
+    for await (const u of runTask("t", base([fake("claude", () => OK)], { verify, signal: ac.signal }))) {
+      all.push(u);
+      if ((u.type === "event" && u.event.type === trigger) || (u.type === "phase" && u.phase === trigger)) ac.abort();
+    }
+    expect(all.at(-1)).toMatchObject({ type: "phase", phase: "failed", message: "aborted" });
+    expect(all.some((u) => u.type === "outcome")).toBe(false);
+  }
+  expect(readOutcomes()).toHaveLength(0);
+});
+
+test("start-failure fallbacks are capped at 3 (4 attempts)", async () => {
+  const all = (["claude", "codex", "opencode", "pi", "droid"] as const).map((id) => fake(id, () => BOOT_FAIL));
+  const r = await collect(runTask("t", base(all)));
+  expect(r.all.filter((u) => u.type === "fallback")).toHaveLength(3);
+  expect(all.map((a) => a.runs)).toEqual([1, 1, 1, 1, 0]);
+  expect(r.last.phase).toBe("failed");
+});
+
+test("native session id comes only from the final route; rate refuses without an outcome", async () => {
+  const a = fake("claude", () => [{ type: "session", id: "stale" }, { type: "error", message: "auth" }, { type: "done", ok: false }]);
+  const b = fake("codex", () => [{ type: "text", text: "hi" }, { type: "done", ok: true }]);
+  const r = await collect(runTask("t", base([a, b])));
+  expect(getSession(r.all.find((u) => u.type === "started")!.sessionId)?.nativeSessionId).toBeUndefined();
+
+  const dead = await collect(runTask("t", base([fake("claude", () => BOOT_FAIL)])));
+  const id = dead.all.find((u) => u.type === "started")!.sessionId;
+  expect(() => rateSession(id, "pass")).toThrow("no outcome");
+});
+
+test("edit-mode notice for non-codex adapters only", async () => {
+  const notices = async (id: Adapter["id"], autonomy: "edit" | "read") =>
+    (await collect(runTask("t", base([fake(id, () => OK)], { autonomy })))).all.filter((u) => u.type === "notice");
+  expect(await notices("claude", "edit")).toEqual([{ type: "notice", message: expect.stringContaining("no OS sandbox") }]);
+  expect(await notices("codex", "edit")).toHaveLength(0);
+  expect(await notices("claude", "read")).toHaveLength(0);
 });
 
 test("dry-run stops after ranked: no session, no run, no outcome", async () => {
@@ -139,6 +191,26 @@ test("outcome is recorded and session stores the native id; rate supersedes; res
   const res = await collect(resumeTask(id, "more", { adapters: [a] }));
   expect(a.resumed).toEqual(["native-1"]);
   expect(res.last.phase).toBe("done");
+  // rated result survives a resume without verify; cost sums
+  expect(res.outcome).toMatchObject({ result: "pass", costUsd: 1 });
+  expect(res.outcome!.latencyMs).toBeGreaterThanOrEqual(readOutcomes()[0]!.latencyMs - 1);
+
+  // a verify that re-runs on resume wins
+  const again = await collect(resumeTask(id, "more", { adapters: [a], verify: "false" }));
+  expect(again.outcome).toMatchObject({ result: "fail", costUsd: 1.5 });
+});
+
+test("resume reuses stored autonomy but never escalates to full without the flag", async () => {
+  const a = fake("claude", () => OK, true);
+  const mk = async (autonomy: "read" | "full") => {
+    const r = await collect(runTask("t", base([a], { autonomy })));
+    return r.all.find((u) => u.type === "started")!.sessionId;
+  };
+  await collect(resumeTask(await mk("read"), "p", { adapters: [a] }));
+  await collect(resumeTask(await mk("full"), "p", { adapters: [a] }));
+  const full = await mk("full");
+  await collect(resumeTask(full, "p", { adapters: [a], autonomy: "full" }));
+  expect(a.autonomy).toEqual(["read", "edit", "full"]);
 });
 
 test("resume reports unsupported adapters", async () => {
