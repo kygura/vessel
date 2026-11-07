@@ -1,10 +1,7 @@
-import { runCapture, spawnJsonl, which } from "../core/proc.ts";
+import { runCapture, which } from "../core/proc.ts";
 import type { Adapter, ModelRef, ProbeResult, RouterEvent, RunRequest } from "../core/types.ts";
+import { clip, obj, streamCli } from "./common.ts";
 
-type Obj = Record<string, any>;
-const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null;
-const str = (v: unknown) => (typeof v === "string" ? v : v === undefined ? undefined : JSON.stringify(v));
-const clip = (s: string | undefined) => (s && s.length > 500 ? `${s.slice(0, 500)}...` : s);
 const first = (...vs: unknown[]) => vs.find((v) => v !== undefined && v !== null);
 
 /**
@@ -12,8 +9,8 @@ const first = (...vs: unknown[]) => vs.find((v) => v !== undefined && v !== null
  * Field names are unverified (see docs/cli-contracts.md), so every field is optional.
  * `session_id` on any line yields a `session` event; callers dedupe.
  */
-export function parseDroidLine(json: unknown): RouterEvent[] {
-  if (!isObj(json)) return [];
+export function parseDroidLine(raw: unknown): RouterEvent[] {
+  const json = obj(raw);
   const out: RouterEvent[] = [];
   if (typeof json.session_id === "string") out.push({ type: "session", id: json.session_id });
   switch (json.type) {
@@ -25,27 +22,27 @@ export function parseDroidLine(json: unknown): RouterEvent[] {
     case "tool_call":
       out.push({
         type: "tool",
-        name: str(first(json.toolName, json.tool_name, json.name)) ?? "tool",
+        name: clip(first(json.toolName, json.tool_name, json.name)) ?? "tool",
         status: "started",
-        input: clip(str(first(json.parameters, json.input, json.args))),
+        input: clip(first(json.parameters, json.input, json.args)),
       });
       break;
     case "tool_result":
       out.push({
         type: "tool",
-        name: str(first(json.toolName, json.tool_name, json.name)) ?? "tool",
+        name: clip(first(json.toolName, json.tool_name, json.name)) ?? "tool",
         status: json.isError === true ? "failed" : "completed",
-        output: clip(str(first(json.content, json.value, json.result))),
+        output: clip(first(json.content, json.value, json.result)),
       });
       break;
     case "error": {
       const e = json.error;
-      out.push({ type: "error", message: (isObj(e) ? str(e.message) : str(e)) ?? str(json.message) ?? "droid reported an error" });
+      out.push({ type: "error", message: clip(e?.message ?? e ?? json.message) ?? "droid reported an error" });
       break;
     }
     case "completion": {
       const u = json.usage;
-      if (isObj(u)) {
+      if (u && typeof u === "object") {
         const n = (v: unknown) => (typeof v === "number" ? v : undefined);
         out.push({ type: "usage", inputTokens: n(first(u.input_tokens, u.inputTokens)), outputTokens: n(first(u.output_tokens, u.outputTokens)) });
       }
@@ -67,54 +64,26 @@ export function buildDroidArgv(req: RunRequest, bin = "droid", sessionId?: strin
   ];
 }
 
-/** Parses the "Available built-in models: a, b, c" line from `droid exec --help`. */
-export function parseDroidModels(help: string): ModelRef[] {
-  const m = help.match(/available built-in models:?[ \t]*(.*)/i);
-  if (!m?.[1]) return [];
-  return m[1]
+/** Parses the "Available built-in models:" block (comma list, possibly on the next line) printed for an invalid model. */
+export function parseDroidModels(text: string): ModelRef[] {
+  const m = text.match(/available built-in models:?([^\n]*(?:\n[ \t]+[^\n]+)?)/i);
+  return (m?.[1] ?? "")
     .split(/[,\s]+/)
-    .map((s) => s.replace(/[.;]+$/, ""))
+    .map((x) => x.replace(/[.;]+$/, ""))
     .filter(Boolean)
     .map((model) => ({ adapter: "droid" as const, model }));
 }
 
-async function* stream(argv: string[], cwd: string, signal: AbortSignal): AsyncGenerator<RouterEvent> {
-  let proc: ReturnType<typeof spawnJsonl>;
-  try {
-    proc = spawnJsonl(argv, { cwd, signal });
-  } catch (e) {
-    yield { type: "error", message: `failed to spawn droid: ${e}` };
-    yield { type: "done", ok: false };
-    return;
-  }
-  let last: string | undefined;
+/** An `error` event anywhere in the run makes the final `done` not ok. */
+async function* failOnError(it: AsyncIterable<RouterEvent>): AsyncGenerator<RouterEvent> {
   let failed = false;
-  let done = false;
-  let sessionSeen = false;
-  for await (const l of proc.lines) {
-    const evs: RouterEvent[] =
-      l.json === undefined ? [{ type: "error", message: `malformed droid output: ${l.raw.slice(0, 200)}` }] : parseDroidLine(l.json);
-    for (const ev of evs) {
-      if (done) continue;
-      if (ev.type === "session") {
-        if (sessionSeen) continue;
-        sessionSeen = true;
-      }
-      if (ev.type === "text") last = ev.text;
-      if (ev.type === "error") failed = true;
-      if (ev.type === "done") {
-        done = true;
-        yield { type: "done", ok: ev.ok && !failed, finalText: ev.finalText ?? last };
-      } else yield ev;
-    }
-  }
-  const exit = await proc.exit;
-  if (!done) {
-    const ok = exit.exitCode === 0 && !failed;
-    if (!ok && !failed) yield { type: "error", message: `droid exited with code ${exit.exitCode}: ${exit.stderrTail.trim()}` };
-    yield { type: "done", ok, finalText: last };
+  for await (const ev of it) {
+    if (ev.type === "error") failed = true;
+    yield ev.type === "done" && failed ? { ...ev, ok: false } : ev;
   }
 }
+
+const stream = (argv: string[], cwd: string, signal: AbortSignal) => failOnError(streamCli(argv, { cwd, signal }, parseDroidLine));
 
 export function createDroidAdapter(bin = "droid", env: Record<string, string | undefined> = process.env): Adapter {
   return {
@@ -122,7 +91,9 @@ export function createDroidAdapter(bin = "droid", env: Record<string, string | u
     capabilities: { resume: true, cost: false, listModels: true },
     async probe(): Promise<ProbeResult> {
       if (!which(bin)) return { available: false, reason: "droid not found on PATH", models: [] };
-      const models = parseDroidModels((await runCapture([bin, "exec", "--help"], 5000)).stdout);
+      // An invalid model makes droid print its built-in model list and exit before auth.
+      const r = await runCapture([bin, "exec", "-m", "__router_probe__", "x"], 5000);
+      const models = parseDroidModels(`${r.stdout}\n${r.stderr}`);
       // Auth state is not queryable; FACTORY_API_KEY is the only signal we have.
       if (!env.FACTORY_API_KEY) return { available: false, reason: "not logged in (FACTORY_API_KEY unset)", models };
       return { available: true, models };

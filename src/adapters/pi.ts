@@ -1,51 +1,49 @@
-import { runCapture, spawnJsonl, which } from "../core/proc.ts";
+import { runCapture, which } from "../core/proc.ts";
 import type { Adapter, ModelRef, ProbeResult, RouterEvent, RunRequest } from "../core/types.ts";
+import { clip, obj, streamCli } from "./common.ts";
 
 export const PI_SANDBOX_NOTE = "pi has no sandbox at any autonomy level: tools run with your full user permissions";
 
 const READ_TOOLS = "read,grep,find,ls";
 const EDIT_TOOLS = "read,edit,write,bash,grep,find,ls";
 
-type Obj = Record<string, any>;
-const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null;
-const str = (v: unknown) => (typeof v === "string" ? v : v === undefined ? undefined : JSON.stringify(v));
-const clip = (s: string | undefined) => (s && s.length > 500 ? `${s.slice(0, 500)}...` : s);
+const name = (v: unknown) => (typeof v === "string" ? v : "tool");
 
 /** Native pi `--mode json` line -> normalized events. Unknown or malformed shapes yield []. */
-export function parsePiLine(json: unknown): RouterEvent[] {
-  if (!isObj(json)) return [];
+export function parsePiLine(raw: unknown): RouterEvent[] {
+  const json = obj(raw);
   switch (json.type) {
     case "session":
       return typeof json.id === "string" ? [{ type: "session", id: json.id }] : [];
     case "message_end": {
       const m = json.message;
-      if (!isObj(m) || m.role !== "assistant") return [];
+      if (m?.role !== "assistant") return [];
       const out: RouterEvent[] = [];
       const text = Array.isArray(m.content)
-        ? m.content.filter((c) => isObj(c) && c.type === "text" && typeof c.text === "string").map((c) => c.text).join("")
+        ? m.content.filter((c: any) => c?.type === "text" && typeof c.text === "string").map((c: any) => c.text).join("")
         : "";
       if (text) out.push({ type: "text", text });
       const u = m.usage;
-      if (isObj(u)) {
+      if (u && typeof u === "object") {
         out.push({
           type: "usage",
           inputTokens: typeof u.input === "number" ? u.input : undefined,
           outputTokens: typeof u.output === "number" ? u.output : undefined,
-          costUsd: isObj(u.cost) && typeof u.cost.total === "number" ? u.cost.total : undefined,
+          costUsd: typeof u.cost?.total === "number" ? u.cost.total : undefined,
         });
       }
-      if (m.stopReason === "error") out.push({ type: "error", message: str(m.errorMessage) ?? "pi reported an error" });
+      if (m.stopReason === "error") out.push({ type: "error", message: clip(m.errorMessage) ?? "pi reported an error" });
       return out;
     }
     case "tool_execution_start":
-      return [{ type: "tool", name: str(json.toolName) ?? "tool", status: "started", input: clip(str(json.args)) }];
+      return [{ type: "tool", name: name(json.toolName), status: "started", input: clip(json.args) }];
     case "tool_execution_end":
       return [
         {
           type: "tool",
-          name: str(json.toolName) ?? "tool",
+          name: name(json.toolName),
           status: json.isError === true ? "failed" : "completed",
-          output: clip(str(json.result)),
+          output: clip(json.result),
         },
       ];
     case "agent_settled":
@@ -81,38 +79,16 @@ export function parsePiModels(text: string): ModelRef[] {
   return rows.slice(header + 1).map(([provider, id]) => ({ adapter: "pi" as const, model: `${provider}/${id}`, provider }));
 }
 
-async function* stream(argv: string[], cwd: string, signal: AbortSignal): AsyncGenerator<RouterEvent> {
-  let proc: ReturnType<typeof spawnJsonl>;
-  try {
-    proc = spawnJsonl(argv, { cwd, signal });
-  } catch (e) {
-    yield { type: "error", message: `failed to spawn pi: ${e}` };
-    yield { type: "done", ok: false };
-    return;
-  }
-  let last: string | undefined;
+/** An `error` event anywhere in the run makes the final `done` not ok. */
+async function* failOnError(it: AsyncIterable<RouterEvent>): AsyncGenerator<RouterEvent> {
   let failed = false;
-  let done = false;
-  for await (const l of proc.lines) {
-    const evs: RouterEvent[] =
-      l.json === undefined ? [{ type: "error", message: `malformed pi output: ${l.raw.slice(0, 200)}` }] : parsePiLine(l.json);
-    for (const ev of evs) {
-      if (done) continue;
-      if (ev.type === "text") last = ev.text;
-      if (ev.type === "error") failed = true;
-      if (ev.type === "done") {
-        done = true;
-        yield { type: "done", ok: ev.ok && !failed, finalText: ev.finalText ?? last };
-      } else yield ev;
-    }
-  }
-  const exit = await proc.exit;
-  if (!done) {
-    const ok = exit.exitCode === 0 && !failed;
-    if (!ok && !failed) yield { type: "error", message: `pi exited with code ${exit.exitCode}: ${exit.stderrTail.trim()}` };
-    yield { type: "done", ok, finalText: last };
+  for await (const ev of it) {
+    if (ev.type === "error") failed = true;
+    yield ev.type === "done" && failed ? { ...ev, ok: false } : ev;
   }
 }
+
+const stream = (argv: string[], cwd: string, signal: AbortSignal) => failOnError(streamCli(argv, { cwd, signal }, parsePiLine));
 
 export function createPiAdapter(bin = "pi"): Adapter {
   return {

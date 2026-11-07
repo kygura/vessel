@@ -37,7 +37,7 @@ test("no completion -> done synthesized from exit code with last text; malformed
   const ok = await collect(createDroidAdapter(fakeBin(`cat ${fixture("droid-noterminal.jsonl")}`)).run(req, sig()));
   expect(ok.at(-1)).toEqual({ type: "done", ok: true, finalText: "partial answer" });
   expect(ok.filter((e) => e.type === "done")).toHaveLength(1);
-  const bad = await collect(createDroidAdapter(fakeBin(`echo 'garbage'; echo oops >&2; exit 1`)).resume!("sid", req, sig()));
+  const bad = await collect(createDroidAdapter(fakeBin(`echo 'garbage'; exit 0`)).resume!("sid", req, sig()));
   expect(bad.map((e) => e.type)).toEqual(["error", "done"]);
   expect(bad.at(-1)).toMatchObject({ ok: false });
   const crash = await collect(createDroidAdapter(fakeBin(`echo oops >&2; exit 1`)).run(req, sig()));
@@ -63,7 +63,7 @@ test("argv per autonomy; resume uses -s", () => {
   expect(argv("read", "abc")).toEqual([...base, "-s", "abc", "--", "hi"]);
 });
 
-const HELP = `Options:\n  -m, --model <id>  Model ID\n\nAvailable built-in models: claude-opus-4-8, gpt-5, glm-4.6.\n\nExamples:\n  droid exec "x"\n`;
+const HELP = `Invalid model: __router_probe__\n\nAvailable built-in models:\n  claude-opus-4-8, gpt-5, glm-4.6\n\nNo custom models configured. Add them to ~/.factory/settings.json\n`;
 
 test("probe: model parsing and auth by FACTORY_API_KEY", async () => {
   expect(parseDroidModels(HELP)).toEqual([
@@ -72,6 +72,7 @@ test("probe: model parsing and auth by FACTORY_API_KEY", async () => {
     { adapter: "droid", model: "glm-4.6" },
   ]);
   expect(parseDroidModels("no list here")).toEqual([]);
+  expect(parseDroidModels("Available built-in models: a, b.\n\nx")).toEqual([{ adapter: "droid", model: "a" }, { adapter: "droid", model: "b" }]);
   const bin = fakeBin(`printf '%s' '${HELP}'`);
   expect(await createDroidAdapter(bin, { FACTORY_API_KEY: "k" }).probe()).toMatchObject({ available: true, models: [{ model: "claude-opus-4-8" }, {}, {}] });
   expect(await createDroidAdapter(bin, {}).probe()).toMatchObject({ available: false, reason: "not logged in (FACTORY_API_KEY unset)" });
