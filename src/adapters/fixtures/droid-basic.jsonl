@@ -1,0 +1,7 @@
+{"type":"system","subtype":"init","session_id":"droid-sess-1","model":"claude-opus-4-8"}
+{"type":"message","role":"user","text":"do it","session_id":"droid-sess-1"}
+{"type":"message","role":"assistant","text":"Working on it","session_id":"droid-sess-1"}
+{"type":"tool_call","toolName":"Execute","parameters":{"command":"ls"}}
+{"type":"tool_result","isError":false,"content":"a.txt"}
+{"type":"future_event"}
+{"type":"completion","finalText":"All done","numTurns":2,"durationMs":1200,"session_id":"droid-sess-1","usage":{"input_tokens":100,"output_tokens":20}}
