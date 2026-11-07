@@ -1,6 +1,7 @@
 import { closeSync, constants, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
+import { errMsg, runCapture } from "../../core/proc.ts";
 import type { Autonomy } from "../../core/types.ts";
 
 export const BASH_TIMEOUT_MS = 120_000;
@@ -144,23 +145,10 @@ function parse<T>(schema: z.ZodType<T>, input: unknown): T {
 async function runBash(command: string, ctx: ToolContext): Promise<ToolResult> {
   const env: Record<string, string> = {};
   for (const k of BASH_ENV_ALLOW) if (process.env[k] !== undefined) env[k] = process.env[k]!;
-  const proc = Bun.spawn(["bash", "-c", command], {
-    cwd: realpathSync(ctx.cwd),
-    env,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-    timeout: BASH_TIMEOUT_MS,
-    signal: ctx.signal,
-  });
-  const [out, err, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  const killed = proc.signalCode ? `\n[killed: ${proc.signalCode}${ctx.signal?.aborted ? "" : ", timeout"}]` : "";
-  const body = truncate(redact(`${out}${err ? `\n[stderr]\n${err}` : ""}`, ctx.secrets ?? []));
-  return { output: `exit ${code}${killed}\n${body}`, isError: code !== 0 || killed !== "" };
+  const r = await runCapture(["bash", "-c", command], BASH_TIMEOUT_MS, { cwd: realpathSync(ctx.cwd), env, signal: ctx.signal });
+  const status = r.timedOut ? "killed: timeout" : r.exitCode === null ? (ctx.signal?.aborted ? "killed: aborted" : "failed to run") : `exit ${r.exitCode}`;
+  const body = truncate(redact(`${r.stdout}${r.stderr ? `\n[stderr]\n${r.stderr}` : ""}`, ctx.secrets ?? []));
+  return { output: `${status}\n${body}`, isError: r.exitCode !== 0 };
 }
 
 /** Executes one tool call. Never throws: failures come back as isError results for the model. */
@@ -198,7 +186,7 @@ async function runToolRaw(name: string, input: unknown, autonomy: Autonomy, ctx:
     }
     throw new ToolError(`unknown tool: ${name}`);
   } catch (e) {
-    return { output: e instanceof Error ? e.message : String(e), isError: true };
+    return { output: errMsg(e), isError: true };
   }
 }
 

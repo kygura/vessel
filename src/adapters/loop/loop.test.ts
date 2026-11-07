@@ -200,6 +200,20 @@ describe("provider validation", () => {
   });
 });
 
+test("complete() honours its abort signal", async () => {
+  script = [() => new Response(new ReadableStream({ start() {} }))]; // never finishes
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 50);
+  await expect(complete("ant", "claude-x", "x", z.object({}), { signal: ac.signal })).rejects.toThrow();
+});
+
+test("bash timeout/abort goes through runCapture (abort reports killed)", async () => {
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 100);
+  const r = await runTool("bash", { command: "sleep 30" }, "edit", { cwd: work, signal: ac.signal });
+  expect(r).toMatchObject({ isError: true, output: expect.stringContaining("killed: aborted") });
+});
+
 describe("probe", () => {
   test("lists models for providers with key set", async () => {
     const p = await loopAdapter.probe();

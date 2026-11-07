@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RouterEvent, RunRequest } from "../core/types.ts";
-import { PI_SANDBOX_NOTE, buildPiArgv, createPiAdapter, parsePiLine, parsePiModels } from "./pi.ts";
+import { buildPiArgv, createPiAdapter, parsePiLine, parsePiModels } from "./pi.ts";
 
 const req: RunRequest = { prompt: "hi", cwd: "/tmp", model: "anthropic/sonnet", effort: "high", autonomy: "edit" };
 const fixture = (n: string) => join(import.meta.dir, "fixtures", n);
@@ -82,7 +82,5 @@ test("probe parsers", async () => {
   const a = createPiAdapter(fakeBin(`printf '%s' '${TABLE}'`));
   expect(await a.probe()).toMatchObject({ available: true, models: [{ model: "anthropic/claude-sonnet-4-5" }, { model: "openai/gpt-5" }] });
   expect(await createPiAdapter(fakeBin("echo 'No models available.'")).probe()).toMatchObject({ available: false, models: [] });
-  expect(await createPiAdapter("definitely-not-a-bin-xyz").probe()).toMatchObject({ available: false });
-  expect(createPiAdapter().capabilities).toEqual({ resume: true, cost: true, listModels: true });
-  expect(PI_SANDBOX_NOTE).toContain("no sandbox");
+  expect(await createPiAdapter("definitely-not-a-bin-xyz").probe()).toMatchObject({ available: false, reason: "not installed" });
 });

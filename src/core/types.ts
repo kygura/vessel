@@ -61,7 +61,8 @@ export type ProbeResult = z.infer<typeof ProbeResult>;
 
 export interface Adapter {
   id: AdapterId;
-  capabilities: { resume: boolean; cost: boolean; listModels: boolean };
+  /** Resume support = presence of `resume`. */
+  capabilities: { listModels: boolean };
   probe(): Promise<ProbeResult>;
   run(req: RunRequest, signal: AbortSignal): AsyncIterable<RouterEvent>;
   resume?(nativeSessionId: string, req: RunRequest, signal: AbortSignal): AsyncIterable<RouterEvent>;

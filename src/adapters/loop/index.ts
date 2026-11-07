@@ -1,6 +1,8 @@
 import type { z } from "zod";
 import { type Config, type ProviderConfig, loadConfig } from "../../core/config.ts";
+import { errMsg } from "../../core/proc.ts";
 import type { Adapter, ModelRef, ProbeResult, RouterEvent, RunRequest } from "../../core/types.ts";
+import { clip } from "../common.ts";
 import { redact, runTool, toolsFor } from "./tools.ts";
 import { type CallOpts, type Msg, callModel } from "./wire.ts";
 
@@ -48,10 +50,6 @@ function resolveParts(config: Config, providerName: string, model: string): Reso
   return { opts: { provider, apiKey, model, secrets }, secrets };
 }
 
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 function systemPrompt(cwd: string, readOnly: boolean): string {
   return [
     "You are a coding agent working in a repository.",
@@ -61,16 +59,11 @@ function systemPrompt(cwd: string, readOnly: boolean): string {
   ].join("\n");
 }
 
-function summarize(input: unknown, secrets: string[]): string {
-  const s = redact(JSON.stringify(input) ?? "", secrets);
-  return s.length > 200 ? `${s.slice(0, 200)}...` : s;
-}
-
 export function createLoopAdapter(opts: { maxTurns?: number } = {}): Adapter {
   const maxTurns = opts.maxTurns ?? DEFAULT_MAX_TURNS;
   return {
     id: "loop",
-    capabilities: { resume: false, cost: false, listModels: true },
+    capabilities: { listModels: true },
 
     async probe(): Promise<ProbeResult> {
       let config: Config;
@@ -131,10 +124,10 @@ export function createLoopAdapter(opts: { maxTurns?: number } = {}): Adapter {
         const results = [];
         for (const c of reply.calls) {
           if (signal.aborted) break;
-          const input = summarize(c.input, r.secrets);
+          const input = clip(redact(JSON.stringify(c.input) ?? "", r.secrets), 200);
           yield { type: "tool", name: c.name, status: "started", input };
           const res = await runTool(c.name, c.input, req.autonomy, { cwd: req.cwd, signal, secrets: r.secrets });
-          yield { type: "tool", name: c.name, status: res.isError ? "failed" : "completed", input, output: res.output.slice(0, 500) };
+          yield { type: "tool", name: c.name, status: res.isError ? "failed" : "completed", input, output: clip(res.output) };
           results.push({ id: c.id, ...res });
         }
         msgs.push({ role: "tool", results });
@@ -148,21 +141,19 @@ export function createLoopAdapter(opts: { maxTurns?: number } = {}): Adapter {
 export const loopAdapter = createLoopAdapter();
 
 /**
- * One-shot, tool-less completion (used by the classifier's LLM fallback). With a schema, the reply's
- * outermost JSON object is extracted and validated; throws on HTTP, parse, or validation failure.
+ * One-shot, tool-less completion (used by the classifier's LLM fallback). The reply's outermost JSON
+ * object is extracted and validated; throws on HTTP, abort, parse, or validation failure.
  */
-export async function complete(providerName: string, model: string, prompt: string): Promise<string>;
-export async function complete<T>(providerName: string, model: string, prompt: string, schema: z.ZodType<T>): Promise<T>;
-export async function complete<T>(providerName: string, model: string, prompt: string, schema?: z.ZodType<T>): Promise<T | string> {
+export async function complete<T>(
+  providerName: string,
+  model: string,
+  prompt: string,
+  schema: z.ZodType<T>,
+  o: { signal?: AbortSignal } = {},
+): Promise<T> {
   const { opts } = resolveParts(loadConfig(), providerName, model);
-  const text = (
-    await callModel(
-      { ...opts, system: schema ? "Reply with a single JSON object only, no prose or code fences." : undefined },
-      [{ role: "user", text: prompt }],
-      [],
-    )
-  ).text;
-  if (!schema) return text;
+  const system = "Reply with a single JSON object only, no prose or code fences.";
+  const { text } = await callModel({ ...opts, system, signal: o.signal }, [{ role: "user", text: prompt }], []);
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start < 0 || end < start) throw new Error("no JSON object in model reply");

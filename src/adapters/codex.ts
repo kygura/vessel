@@ -1,6 +1,11 @@
 import type { Adapter, ModelRef, RouterEvent, RunRequest } from "../core/types.ts";
 import { runCapture } from "../core/proc.ts";
-import { clip, obj, probeCli, streamCli } from "./common.ts";
+import { z } from "zod";
+import { clip, obj, parseJson, probeCli, streamCli } from "./common.ts";
+
+const DebugModels = z.object({
+  models: z.array(z.object({ slug: z.string(), visibility: z.string().optional() }).loose()).default([]),
+});
 
 /** Codex `exec --json` event -> normalized events. Final answer text is filled from the last agent_message by streamCli. */
 export function parseCodexLine(json: unknown): RouterEvent[] {
@@ -66,19 +71,18 @@ const stream = (req: RunRequest, signal: AbortSignal, resumeId?: string) =>
 
 async function listModels(): Promise<ModelRef[]> {
   const r = await runCapture(["codex", "debug", "models"], 5000);
-  try {
-    const models: any[] = JSON.parse(r.stdout).models ?? [];
-    return models
-      .filter((m) => typeof m?.slug === "string" && m.visibility !== "hide")
-      .map((m) => ({ adapter: "codex" as const, model: m.slug }));
-  } catch {
-    return [];
-  }
+  return parseCodexModels(r.stdout);
+}
+
+export function parseCodexModels(stdout: string): ModelRef[] {
+  return (parseJson(DebugModels, stdout)?.models ?? [])
+    .filter((m) => m.visibility !== "hide")
+    .map((m) => ({ adapter: "codex" as const, model: m.slug }));
 }
 
 export const codex: Adapter = {
   id: "codex",
-  capabilities: { resume: true, cost: false, listModels: true },
+  capabilities: { listModels: true },
   probe: () => probeCli("codex", ["codex", "login", "status"], (r) => r.exitCode === 0, listModels),
   run: (req, signal) => stream(req, signal),
   resume: (id, req, signal) => stream(req, signal, id),

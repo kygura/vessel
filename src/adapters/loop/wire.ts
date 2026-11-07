@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ProviderConfig } from "../../core/config.ts";
+import { errMsg } from "../../core/proc.ts";
 import { type ToolDef, redact } from "./tools.ts";
 
 export type ToolCall = { id: string; name: string; input: unknown };
@@ -159,7 +160,6 @@ export async function callModel(o: CallOpts, msgs: Msg[], tools: ToolDef[]): Pro
   try {
     return await (o.provider.kind === "anthropic" ? callAnthropic(o, msgs, tools) : callOpenAI(o, msgs, tools));
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(redact(msg, secretsOf(o)));
+    throw new Error(redact(errMsg(e), secretsOf(o)));
   }
 }

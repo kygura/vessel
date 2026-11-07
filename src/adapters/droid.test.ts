@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RouterEvent, RunRequest } from "../core/types.ts";
@@ -76,6 +76,12 @@ test("probe: model parsing and auth by FACTORY_API_KEY", async () => {
   const bin = fakeBin(`printf '%s' '${HELP}'`);
   expect(await createDroidAdapter(bin, { FACTORY_API_KEY: "k" }).probe()).toMatchObject({ available: true, models: [{ model: "claude-opus-4-8" }, {}, {}] });
   expect(await createDroidAdapter(bin, {}).probe()).toMatchObject({ available: false, reason: "not logged in (FACTORY_API_KEY unset)" });
-  expect(await createDroidAdapter("definitely-not-a-bin-xyz", {}).probe()).toMatchObject({ available: false });
-  expect(createDroidAdapter().capabilities).toEqual({ resume: true, cost: false, listModels: true });
+  expect(await createDroidAdapter("definitely-not-a-bin-xyz", {}).probe()).toMatchObject({ available: false, reason: "not installed" });
+});
+
+test("probe passes the dummy prompt after --", async () => {
+  const log = join(mkdtempSync(join(tmpdir(), "fakedroid-args-")), "args");
+  await createDroidAdapter(fakeBin(`printf '%s\\n' "$@" > ${log}`), {}).probe();
+  const args = readFileSync(log, "utf8").trim().split("\n");
+  expect(args.slice(-2)).toEqual(["--", "x"]);
 });

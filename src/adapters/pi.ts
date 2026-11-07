@@ -1,4 +1,4 @@
-import { runCapture, which } from "../core/proc.ts";
+import { runCapture } from "../core/proc.ts";
 import type { Adapter, ModelRef, ProbeResult, RouterEvent, RunRequest } from "../core/types.ts";
 import { clip, obj, streamCli } from "./common.ts";
 
@@ -84,9 +84,9 @@ const stream = (argv: string[], cwd: string, signal: AbortSignal) => streamCli(a
 export function createPiAdapter(bin = "pi"): Adapter {
   return {
     id: "pi",
-    capabilities: { resume: true, cost: true, listModels: true },
+    capabilities: { listModels: true },
     async probe(): Promise<ProbeResult> {
-      if (!which(bin)) return { available: false, reason: "pi not found on PATH", models: [] };
+      if (!Bun.which(bin)) return { available: false, reason: "not installed", models: [] };
       const r = await runCapture([bin, "--list-models"], 5000);
       const models = parsePiModels(r.stdout);
       if (models.length === 0)

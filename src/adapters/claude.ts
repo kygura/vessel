@@ -1,5 +1,9 @@
 import type { Adapter, RouterEvent, RunRequest } from "../core/types.ts";
-import { clip, obj, probeCli, streamCli } from "./common.ts";
+import { z } from "zod";
+import { clip, obj, parseJson, probeCli, streamCli } from "./common.ts";
+
+const AuthStatus = z.object({ loggedIn: z.boolean() });
+export const claudeLoggedIn = (stdout: string) => parseJson(AuthStatus, stdout)?.loggedIn === true;
 
 const READ_DENY = "Edit Write Bash NotebookEdit";
 const EDIT_TOOLS = "Read Edit Write Bash Glob Grep";
@@ -55,16 +59,10 @@ const stream = (req: RunRequest, signal: AbortSignal, resumeId?: string) =>
 
 export const claude: Adapter = {
   id: "claude",
-  capabilities: { resume: true, cost: true, listModels: false },
+  capabilities: { listModels: false },
   // The CLI has no model listing: models stay [] and the roster fills them from evidence aliases.
   probe: () =>
-    probeCli("claude", ["claude", "auth", "status"], (r) => {
-      try {
-        return r.exitCode === 0 && JSON.parse(r.stdout).loggedIn === true;
-      } catch {
-        return false;
-      }
-    }),
+    probeCli("claude", ["claude", "auth", "status"], (r) => r.exitCode === 0 && claudeLoggedIn(r.stdout)),
   run: (req, signal) => stream(req, signal),
   resume: (id, req, signal) => stream(req, signal, id),
 };

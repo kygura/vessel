@@ -1,6 +1,16 @@
 import type { Adapter, ModelRef, RouterEvent, RunRequest } from "../core/types.ts";
 import { runCapture } from "../core/proc.ts";
-import { clip, obj, probeCli, streamCli } from "./common.ts";
+import { z } from "zod";
+import { clip, obj, parseJson, probeCli, streamCli } from "./common.ts";
+
+/** `auth list --format json`: an array or an object keyed by provider; non-empty = logged in somewhere. */
+const AuthList = z.union([z.array(z.unknown()), z.record(z.string(), z.unknown())]);
+export function opencodeHasAuth(stdout: string): boolean {
+  const t = stdout.trim();
+  if (!/^[[{]/.test(t)) return t.length > 0; // older versions print a text table
+  const j = parseJson(AuthList, t);
+  return j !== undefined && Object.keys(j).length > 0;
+}
 
 /** OpenCode `run --format json` event -> normalized events. `session` repeats on every line; streamCli dedupes. */
 export function parseOpencodeLine(json: unknown): RouterEvent[] {
@@ -75,19 +85,14 @@ async function listModels(): Promise<ModelRef[]> {
 
 export const opencode: Adapter = {
   id: "opencode",
-  capabilities: { resume: true, cost: true, listModels: true },
+  capabilities: { listModels: true },
   probe: () =>
     probeCli(
       "opencode",
       ["opencode", "auth", "list", "--format", "json"],
       (r) => {
         if (r.exitCode !== 0) return false;
-        try {
-          const j = JSON.parse(r.stdout);
-          return Array.isArray(j) ? j.length > 0 : Object.keys(obj(j)).length > 0;
-        } catch {
-          return r.stdout.trim().length > 0;
-        }
+        return opencodeHasAuth(r.stdout);
       },
       listModels,
     ),
