@@ -60,7 +60,8 @@ export function rank(
   }
 
   // outcomes are already one-per-session (sessions.readOutcomes)
-  const forTier = o.outcomes.filter((x) => x.tier === tier);
+  // startFailed outcomes (route never ran) give no quality or latency credit, even once rated
+  const forTier = o.outcomes.filter((x) => x.tier === tier && !x.startFailed);
   const mine = (r: ModelRef) => forTier.filter((x) => x.route.adapter === r.adapter && x.route.model === r.model);
 
   const costs = refs.map(costOf);

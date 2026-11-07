@@ -80,6 +80,8 @@ export const Outcome = z.object({
   result: OutcomeResult,
   costUsd: z.number().optional(),
   latencyMs: z.number(),
+  /** Every route failed to start: the route never ran, so it earns no quality or latency credit. */
+  startFailed: z.literal(true).optional(),
 });
 export type Outcome = z.infer<typeof Outcome>;
 

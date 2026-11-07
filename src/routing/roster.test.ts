@@ -16,7 +16,7 @@ const evidence: Evidence = { aliases: {}, models: { "claude-x": e("anthropic"), 
 function fake(id: Adapter["id"], probe: () => Promise<ProbeResult>, listModels = true): Adapter & { calls: number } {
   const a = {
     id, calls: 0,
-    capabilities: { resume: false, cost: false, listModels },
+    capabilities: { listModels },
     probe: () => { a.calls++; return probe(); },
     run: async function* () {},
   };

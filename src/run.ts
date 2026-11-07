@@ -122,7 +122,7 @@ function resolveVerify(explicit: string | undefined, cwd: string): { command?: s
 export const editNotice = (adapter: string) => `${adapter} edit mode runs shell commands with your user privileges (no OS sandbox)`;
 
 async function runVerify(cmd: string, cwd: string, signal?: AbortSignal) {
-  const r = await runCapture(["sh", "-c", cmd], VERIFY_TIMEOUT_MS, { cwd, signal });
+  const r = await runCapture(["sh", "-c", cmd], VERIFY_TIMEOUT_MS, { cwd, signal, keep: "tail" });
   return { ok: r.exitCode === 0, exitCode: r.exitCode, output: (r.stdout + r.stderr).trim().slice(-2000) };
 }
 
@@ -186,7 +186,7 @@ async function* execute(
   if (!ran) {
     // Start failures are availability, not quality: record one `unknown` outcome only so the session can be listed and rated.
     if (!o.prev && lastTried) {
-      appendOutcome({ sessionId: s.id, ts: new Date().toISOString(), route: lastTried, tier: s.tier, result: "unknown", costUsd: spent, latencyMs: Date.now() - t00 });
+      appendOutcome({ sessionId: s.id, ts: new Date().toISOString(), route: lastTried, tier: s.tier, result: "unknown", costUsd: spent, latencyMs: Date.now() - t00, startFailed: true });
     }
     yield { type: "phase", phase: "failed", message: `no route started: ${lastReason}` };
     return;
@@ -258,6 +258,10 @@ async function* plan(prompt: string, opts: RunOptions): AsyncGenerator<RunUpdate
   yield { type: "ranked", candidates };
   if (opts.dryRun) {
     yield { type: "phase", phase: "done", message: "dry run" };
+    return;
+  }
+  if (opts.signal?.aborted) {
+    yield ABORTED;
     return;
   }
 

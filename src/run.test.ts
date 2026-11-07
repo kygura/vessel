@@ -26,7 +26,7 @@ const BOOT_FAIL: RouterEvent[] = [{ type: "error", message: "not logged in" }, {
 function fake(id: Adapter["id"], script: Script, resume = false): Adapter & { runs: number; resumed: string[]; autonomy: string[] } {
   const a = {
     id, runs: 0, resumed: [] as string[], autonomy: [] as string[],
-    capabilities: { resume, cost: true, listModels: true },
+    capabilities: { listModels: true },
     probe: async () => ({ available: true, models: [{ adapter: id, model: `${id}-m` }] }),
     async *run() {
       const r = script(a.runs++);
@@ -73,7 +73,7 @@ test("falls back when the adapter throws on spawn; fails when every route fails"
   expect(b.runs).toBe(1);
   expect(r.outcome).toBeUndefined();
   // all-fail: no per-route outcomes, just one `unknown` for the last tried route so the session can be rated
-  expect(readOutcomes()).toMatchObject([{ result: "unknown", route: { adapter: "codex" } }]);
+  expect(readOutcomes()).toMatchObject([{ result: "unknown", route: { adapter: "codex" }, startFailed: true }]);
   expect(rateSession(listSessions()[0]!.id, "fail").result).toBe("fail");
 });
 
@@ -259,4 +259,16 @@ test("malformed .router.json yields a notice instead of silently running nothing
   writeFileSync(join(cwd, ".router.json"), JSON.stringify({ verify: 3 }));
   const r2 = await collect(runTask("t", base([fake("claude", () => OK)])));
   expect(r2.all.some((u) => u.type === "notice" && u.message.startsWith("ignored .router.json:"))).toBe(true);
+});
+
+test("abort right after ranked creates no session", async () => {
+  const ac = new AbortController();
+  const all: RunUpdate[] = [];
+  for await (const u of runTask("t", base([fake("claude", () => OK)], { signal: ac.signal }))) {
+    all.push(u);
+    if (u.type === "ranked") ac.abort();
+  }
+  expect(all.at(-1)).toMatchObject({ phase: "failed", message: "aborted" });
+  expect(all.some((u) => u.type === "started")).toBe(false);
+  expect(listSessions()).toHaveLength(0);
 });

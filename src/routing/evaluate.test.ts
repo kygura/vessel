@@ -157,3 +157,11 @@ test("pinned pick with evidence.default.json numbers (7 claude routes)", () => {
   expect(pick("hard")).toBe("claude-opus-5-5");
   expect(pick("trivial")).toBe("claude-haiku-5-5"); // lambda_c 0.4: haiku ~0.364 beats sonnet ~0.299;
 });
+
+test("startFailed outcomes get no quality or latency credit, even when rated", () => {
+  const dead = { ...outcome("model-a", "pass", "standard"), startFailed: true as const, latencyMs: 999999 };
+  const c = rank([ref("model-a")], "standard", { ...base, outcomes: [dead] })[0]!;
+  expect(c.runs).toBe(0);
+  expect(c.local).toBe(0.5);
+  expect(c.latencyNorm).toBe(0);
+});
