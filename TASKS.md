@@ -40,7 +40,7 @@ Destination: `router` CLI+TUI that routes coding tasks to the best reachable CLI
 | T6a | TUI presentational components | D1 | ui-impl sonnet@medium | done (e2161b8) |
 | T6b | useRun hook + reducer | T5 D1 | ui-impl sonnet@medium | done (6505fde) |
 | T6c | App.tsx + index.tsx wiring | T6a T6b | ui-impl sonnet@medium | done (155e547) |
-| V | Verification gate (review lenses, finalizer, ponytail-review, spec review, drift, live done checks) | T6 | reviewer opus/sonnet (cross-model) + lenses | running (loop 1/3) |
+| V | Verification gate (review lenses, finalizer, ponytail-review, spec review, drift, live done checks) | T6 | reviewer opus/sonnet (cross-model) + lenses | done (2 loops) |
 
 ## Review round 1 (fixes dispatched in parallel to original authors)
 - R-loop (opus): env allowlist, .git write deny, redirect:error, key redaction everywhere, https/loopback baseUrl, apiKeyEnv shape.
@@ -55,3 +55,12 @@ Destination: `router` CLI+TUI that routes coding tasks to the best reachable CLI
 - Gate L1 resilience: MAJOR useRun mount throws on bad evidence/unwritable home; orphan CLI child when consumer stops (no kill in streamCli finally); verify `sh -c` grandchildren hold pipe → hang past timeout. MINOR roster cache write uncaught, refresh() unhandled rejection, session log reads grow w/ history + pastEvents uncapped, stderr unbounded, plan ignores abort pre-createSession, no idle watchdog.
 - Gate L1 drift: MAJOR sessions rows missing time/route/tier/outcome word/cost; recorded decision fabricates 100% confidence + empty table (fix: persist classification+top candidates in session record); focus indicator lacks reverse-video row; log key hints missing j/k; classifying note never "asking <model>". MINOR height rows-1, collapse thresholds, empty-state wording, roster overlay word "unavailable", silent noRoutes submit.
 - Gate L1 finalizer: MAJOR fallback line never yielded to TUI; verifying header lacks command; LLM classifier ignores timeout/abort (complete() no signal); roster cache key ignores config.json + apiKeyEnv presence. MINOR persist decision on SessionRecord (dup of drift #2), note "asking <model>", verify output not shown in TUI, `r` swallowed in prompt focus, all-start-fail writes no outcome, explored marker unshown, droid "not found" wording, two cost formatters.
+- Gate L1 spec+standards: start failures out of outcomes (SPEC clarified), effort pin must not bypass Pareto, droid probe `--`, dead PROVIDER_OF.codex, zod on emitted events + JSON probe outputs (SPEC clarified), malformed .router.json notice. Docs committed (471188c). One flaky test seen once in 153 — gate loop 2 reruns suite 5x to find it.
+- Gate loop 1 fixes dispatched in parallel: A=core+adapters (opus), B=run/cli/routing/format.ts (sonnet), C=tui (sonnet).
+- L1 C done (8e733fc). Accepted deviation: `r` opens roster on empty prompt only when no routes (else it would eat first letter of 'refactor...').
+- L1 A done (7717282, 61c6867): 170 tests, typecheck clean. Accepted: loop keeps own provider/model split (resolve's last-slash split breaks openrouter/meta-llama/x).
+- Gate loop 2 launched in parallel: live Done + 5x suite flake hunt + abort/orphan check; fresh delta review (reliability/resilience/risk); TUI drift recheck.
+- L2 drift: all 5 prior majors fixed. Remaining minor (accepted): 80-col compact session rows, roster '+N more' truncation, cosmetic 140-col alignment.
+- L2 delta review: MAJOR verify output head-truncated (fix: keep tail). MINOR buffered stdout dropped after exit grace, start-fail outcome skews latency/credit (startFailed flag), Ctrl-C can't reach detached groups (exit-time group registry), abort before createSession, timer not cleared, spawnJsonl grandchildren survive (group kill), stale test fakes. Dispatched to A + B in parallel.
+- L2 live: Done #1-7 PASS, suite 5x 170/170 (no flake reproduced), abort leaves no orphan, recorded decision renders, help works. Found: raw Ctrl+D (\x04) ignored in TUI → sent to C. Noted: wrapped claude inherits user's Claude Code output style/hooks (environment, not router). Duplicate rate row deduped by readOutcomes later-wins.
+- Gate PASSED after 2 fix loops: typecheck clean, 178/178 x2, Done #1-7 live, Ctrl-C leaves no orphan.
