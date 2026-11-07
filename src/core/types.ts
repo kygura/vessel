@@ -82,6 +82,18 @@ export const Outcome = z.object({
 });
 export type Outcome = z.infer<typeof Outcome>;
 
+/** Why a route was picked; candidates holds the top 5 ranked routes. */
+export const RoutingDecision = z.object({
+  tier: Tier,
+  confidence: z.number(),
+  reasons: z.array(z.string()),
+  source: z.enum(["heuristic", "llm", "override"]),
+  candidates: z
+    .array(z.object({ adapter: AdapterId, model: z.string(), effort: Effort, score: z.number(), costUsd: z.number().optional() }))
+    .max(5),
+});
+export type RoutingDecision = z.infer<typeof RoutingDecision>;
+
 export const SessionRecord = z.object({
   id: z.string(),
   createdAt: z.string(),
@@ -93,5 +105,6 @@ export const SessionRecord = z.object({
   nativeSessionId: z.string().optional(),
   result: OutcomeResult.optional(),
   costUsd: z.number().optional(),
+  decision: RoutingDecision.optional(),
 });
 export type SessionRecord = z.infer<typeof SessionRecord>;
